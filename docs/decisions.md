@@ -30,3 +30,14 @@ trains the same preference model the app will use. `nudges.channel` records whic
 
 **Revisit when.** When the engine feels right after a few weeks of use, buy the Apple
 membership and resume `apps/mobile` from its Phase 0 runbook; the app work is Phase 5.
+
+## 2026-11-11 — Ask for routine once, as priors, not rules
+
+**Context.** The engine needed quiet hours and a sense of good moments. iOS cannot reveal what
+other apps are in use, so "nudge while scrolling" is a Phase 5 experiment via Screen Time, not
+a Phase 2 input. The cheap, reliable context is the user's own routine.
+
+**Decision.** `/start` asks four button questions (sleep window, working hours, nudges during
+work, days off), each skippable with a default, editable via `/routine`. Sleep is a hard gate.
+Work hours and days off adjust the opportunity score. From Phase 3, observed response times
+override stated hours. Never ask hour-by-hour detail.

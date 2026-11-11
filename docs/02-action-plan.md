@@ -153,8 +153,10 @@ Mobile libraries: `expo-router`, `expo-notifications`, `expo-secure-store`,
 
 ```sql
 users                  (id, timezone, created_at)
-user_preferences       (user_id PK, quiet_start time, quiet_end time, daily_limit int,
-                        min_interval_minutes int, notifications_enabled bool,
+user_preferences       (user_id PK, timezone text, quiet_start time, quiet_end time,   -- quiet = sleep window
+                        work_start time, work_end time, work_days int[],           -- routine, stated once
+                        nudge_during_work text,                                     -- 'yes'|'lunch'|'no'
+                        daily_limit int, min_interval_minutes int, notifications_enabled bool,
                         style_scores jsonb)            -- {"companion":{"helpful":3,"not":1}, ...}
 device_tokens          (id, user_id, expo_push_token, platform, created_at, last_seen_at)
 
@@ -301,8 +303,10 @@ Any status can return to `active` via the detail view.
 - **I** importance: start 0.5; +0.25 if user edited or added context; +0.25 if opened
   detail ≥2 times; −0.25 per dismissal (min 0).
 - **A** actionability: 1.0 if a next step ≤30 min exists; 0.5 if any steps; 0 if `unclear`.
-- **O** opportunity: experiences 1.0 on Thu–Sat else 0.3; development 0.6; actionable 0.5;
-  ideas 0.4. (Weather and calendar are later inputs.)
+- **O** opportunity: base by type: experiences 1.0 on days off and Thu–Sat else 0.3;
+  development 0.6; actionable 0.5; ideas 0.4. Then routine from preferences: inside working
+  hours multiply by 0.3 if `nudge_during_work = no`, by 1.0 in the lunch hour if `lunch`,
+  by 0.6 if `yes`. Sleep window is a hard gate, never a score. (Weather and calendar later.)
 - **F** feedback: style score (6.5) of the best style; 0.5 until there are ≥3 data points.
 
 Weights stay `0.30R + 0.20I + 0.20A + 0.15O + 0.15F` until two weeks of debug-screen
@@ -368,6 +372,10 @@ Goal: dump thoughts for a week and trust the system to remember and understand t
    status actions, edit type/title), simple overview list grouped by status.
 6. `prompts/fixtures/thoughts.jsonl` with 30 varied thoughts and expected types; a Go test
    behind a build tag that runs them and reports accuracy. Run it before every prompt change.
+7. Routine onboarding (added 11 Nov 2026): `/start` asks four button questions, all skippable
+   with defaults: sleep window (quiet hours), weekday working hours, whether nudges are okay
+   during work (yes / lunch only / no), and days off. Stored in `user_preferences`; `/routine`
+   edits them later. Stated answers are priors; observed response times override them in Phase 3.
 
 Exit: 20+ real thoughts captured over a week; ≥80% interpretations acceptable without edit;
 capture-to-saved under 2 seconds on the phone.
