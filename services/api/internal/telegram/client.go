@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -126,7 +127,9 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeoutSec int) (
 }
 
 func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, keyboard *InlineKeyboardMarkup) (Message, error) {
-	payload := map[string]any{"chat_id": chatID, "text": text}
+	// All outgoing text is HTML: callers escape dynamic content with Esc().
+	payload := map[string]any{"chat_id": chatID, "text": text, "parse_mode": "HTML",
+		"link_preview_options": map[string]any{"is_disabled": true}}
 	if keyboard != nil {
 		payload["reply_markup"] = keyboard
 	}
@@ -151,3 +154,6 @@ func (c *Client) ClearKeyboard(ctx context.Context, chatID, messageID int64) err
 func (c *Client) SetMyCommands(ctx context.Context, cmds []BotCommand) error {
 	return c.call(ctx, "setMyCommands", map[string]any{"commands": cmds}, nil)
 }
+
+// Esc makes user- or model-written text safe inside an HTML message.
+func Esc(s string) string { return html.EscapeString(s) }

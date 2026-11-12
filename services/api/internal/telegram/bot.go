@@ -106,7 +106,7 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 	cmd, arg, _ := strings.Cut(text, " ")
 	switch {
 	case cmd == "/start":
-		b.reply(ctx, chat, "Hi. Send me anything on your mind: something you want to do, try, learn or look into. I'll remember it and, later, help you act on it.\n\nNo need to organise it. Just type it. /list shows what I'm holding.")
+		b.reply(ctx, chat, "👋  <b>Hi. I'm your companion.</b>\n\nSend me anything on your mind: something you want to do, try, learn or look into. I'll remember it and, later, help you act on it.\n\nNo need to organise anything. Just type it.\n\n<i>/list shows what I'm holding.</i>")
 	case cmd == "/id":
 		b.reply(ctx, chat, fmt.Sprintf("Chat id: %d", chat))
 	case cmd == "/list":
@@ -121,9 +121,9 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 			b.reply(ctx, chat, "Couldn't read the cost log.")
 			return
 		}
-		b.reply(ctx, chat, fmt.Sprintf("This month: %d AI calls, about $%.3f.", n, cost))
+		b.reply(ctx, chat, fmt.Sprintf("💸  <b>This month</b>\n%d AI calls · about $%.3f", n, cost))
 	case strings.HasPrefix(cmd, "/"):
-		b.reply(ctx, chat, "I don't know that command. Just send me a thought, or /list.")
+		b.reply(ctx, chat, "🤷  I don't know that one. Just send me a thought, or /list.")
 	default:
 		b.captureThought(ctx, user, text)
 	}
@@ -138,7 +138,7 @@ func (b *Bot) captureThought(ctx context.Context, user store.User, raw string) {
 		b.reply(ctx, user.TelegramChatID, "I couldn't save that. Try again in a moment.")
 		return
 	}
-	b.reply(ctx, user.TelegramChatID, "Got it.")
+	b.reply(ctx, user.TelegramChatID, "✍️  Got it.")
 
 	go func() {
 		ictx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -151,7 +151,7 @@ func (b *Bot) captureThought(ctx context.Context, user store.User, raw string) {
 		})
 		if err != nil {
 			b.log.Error("interpret", "err", err, "thought", t.ID)
-			b.reply(ictx, user.TelegramChatID, "Saved, but I couldn't make sense of it just now. I'll keep the original wording.")
+			b.reply(ictx, user.TelegramChatID, "Saved. I couldn't make sense of it just now, so I'll keep your original wording.")
 			return
 		}
 		stored, err := b.db.AddInterpretation(ictx, t.ID, "ai", interp, info.Model, info.PromptVersion)
@@ -166,25 +166,11 @@ func (b *Bot) captureThought(ctx context.Context, user store.User, raw string) {
 }
 
 func (b *Bot) sendInterpretation(ctx context.Context, chat int64, thoughtID int64, i ai.Interpretation) {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "#%d  %s\n%s · confidence %.0f%%\n", thoughtID, i.Title, humanType(i.Type), i.Confidence*100)
-	if i.ClarificationNeeded {
-		fmt.Fprintf(&sb, "\nQuick question: %s\n", i.ClarificationQuestion)
-	}
-	if len(i.NextSteps) > 0 {
-		sb.WriteString("\nIf you ever want to move on it:\n")
-		for _, s := range i.NextSteps {
-			fmt.Fprintf(&sb, "• %s (~%d min)\n", s.Label, s.EstimatedMinutes)
-		}
-	}
-	if len(i.Assumptions) > 0 {
-		sb.WriteString("\nI assumed: " + strings.Join(i.Assumptions, "; "))
-	}
 	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{{
-		{Text: "Looks right", CallbackData: fmt.Sprintf("ok:%d", thoughtID)},
-		{Text: "Not quite", CallbackData: fmt.Sprintf("wrong:%d", thoughtID)},
+		{Text: "👍 Looks right", CallbackData: fmt.Sprintf("ok:%d", thoughtID)},
+		{Text: "✏️ Not quite", CallbackData: fmt.Sprintf("wrong:%d", thoughtID)},
 	}}}
-	if _, err := b.client.SendMessage(ctx, chat, sb.String(), kb); err != nil {
+	if _, err := b.client.SendMessage(ctx, chat, formatInterpretation(thoughtID, i), kb); err != nil {
 		b.log.Error("send interpretation", "err", err)
 	}
 }
@@ -193,44 +179,14 @@ func (b *Bot) list(ctx context.Context, user store.User) {
 	ts, err := b.db.ListThoughts(ctx, user.ID, []string{"active", "snoozed"}, 50)
 	if err != nil {
 		b.log.Error("list", "err", err)
-		b.reply(ctx, user.TelegramChatID, "Couldn't load the list.")
+		b.reply(ctx, user.TelegramChatID, "Couldn't load the list just now.")
 		return
 	}
 	if len(ts) == 0 {
-		b.reply(ctx, user.TelegramChatID, "Nothing on the list yet. Send me a thought.")
+		b.reply(ctx, user.TelegramChatID, "📭  Nothing here yet. Send me a thought.")
 		return
 	}
-	groups := map[ai.ThoughtType][]store.Thought{}
-	order := []ai.ThoughtType{ai.TypeActionable, ai.TypeExperience, ai.TypeIdea, ai.TypeDevelopment, ai.TypeUnclear}
-	for _, t := range ts {
-		typ := ai.TypeUnclear
-		if t.Interpretation != nil {
-			typ = t.Interpretation.Type
-		}
-		groups[typ] = append(groups[typ], t)
-	}
-	var sb strings.Builder
-	for _, typ := range order {
-		items := groups[typ]
-		if len(items) == 0 {
-			continue
-		}
-		fmt.Fprintf(&sb, "%s\n", strings.ToUpper(humanType(typ)))
-		for _, t := range items {
-			title := t.RawContent
-			if t.Interpretation != nil {
-				title = t.Interpretation.Title
-			}
-			suffix := ""
-			if t.Status == "snoozed" && t.SnoozedUntil != nil {
-				suffix = fmt.Sprintf("  (quiet until %s)", t.SnoozedUntil.Format("2 Jan"))
-			}
-			fmt.Fprintf(&sb, "#%d  %s%s\n", t.ID, title, suffix)
-		}
-		sb.WriteString("\n")
-	}
-	sb.WriteString("Use /done, /snooze or /drop with a number.")
-	b.reply(ctx, user.TelegramChatID, sb.String())
+	b.reply(ctx, user.TelegramChatID, formatList(ts))
 }
 
 func (b *Bot) statusCommand(ctx context.Context, user store.User, cmd, arg string) {
@@ -246,7 +202,7 @@ func (b *Bot) statusCommand(ctx context.Context, user store.User, cmd, arg strin
 	}
 	t, err := b.db.GetThought(ctx, user.ID, id)
 	if errors.Is(err, store.ErrNotFound) {
-		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("I don't have a thought #%d.", id))
+		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("I don't have a thought #%d. /list shows the numbers.", id))
 		return
 	}
 	if err != nil {
@@ -260,10 +216,10 @@ func (b *Bot) statusCommand(ctx context.Context, user store.User, cmd, arg strin
 	switch cmd {
 	case "/done":
 		err = b.db.SetStatus(ctx, id, "done", nil)
-		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("Nice. #%d \"%s\" is done.", id, title))
+		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("🎉  Done: <b>%s</b>", Esc(clean(title))))
 	case "/drop":
 		err = b.db.SetStatus(ctx, id, "archived", nil)
-		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("Okay, letting #%d \"%s\" go. It stays in the archive if you ever want it back.", id, title))
+		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("🗂  Letting go of <b>%s</b>.\n<i>It stays in the archive if you ever want it back.</i>", Esc(clean(title))))
 	case "/snooze":
 		days := 3
 		if len(fields) > 1 {
@@ -273,7 +229,7 @@ func (b *Bot) statusCommand(ctx context.Context, user store.User, cmd, arg strin
 		}
 		until := time.Now().Add(time.Duration(days) * 24 * time.Hour)
 		err = b.db.SetStatus(ctx, id, "snoozed", &until)
-		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("Quiet on #%d \"%s\" for %d days.", id, title, days))
+		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("😴  Quiet on <b>%s</b> for %d days.", Esc(clean(title)), days))
 	}
 	if err != nil {
 		b.log.Error("set status", "err", err, "thought", id)
@@ -291,7 +247,7 @@ func (b *Bot) SendSampleNudge(ctx context.Context) {
 		return
 	}
 	t, err := b.db.LatestInterpreted(ctx, user.ID)
-	text := "Sample nudge: this is what a proactive check-in will look like."
+	text := "👋  <b>Sample nudge</b>\nThis is what a proactive check-in will look like."
 	var id int64
 	if err == nil && t.Interpretation != nil {
 		id = t.ID
@@ -299,11 +255,11 @@ func (b *Bot) SendSampleNudge(ctx context.Context) {
 		if len(t.Interpretation.NextSteps) > 0 {
 			step = t.Interpretation.NextSteps[0].Label
 		}
-		text = fmt.Sprintf("Still thinking about \"%s\"? If you have ten minutes, you could: %s.", t.Interpretation.Title, step)
+		text = formatNudge(t.Interpretation.Title, step)
 	}
 	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
-		{{Text: "Let's do it", CallbackData: fmt.Sprintf("do_it:%d", id)}, {Text: "Show next steps", CallbackData: fmt.Sprintf("next_steps:%d", id)}},
-		{{Text: "Later", CallbackData: fmt.Sprintf("later:%d", id)}, {Text: "Not interested", CallbackData: fmt.Sprintf("not_interested:%d", id)}},
+		{{Text: "🚀 Let's do it", CallbackData: fmt.Sprintf("do_it:%d", id)}, {Text: "📝 Next steps", CallbackData: fmt.Sprintf("next_steps:%d", id)}},
+		{{Text: "⏰ Later", CallbackData: fmt.Sprintf("later:%d", id)}, {Text: "🙅 Not interested", CallbackData: fmt.Sprintf("not_interested:%d", id)}},
 	}}
 	if _, err := b.client.SendMessage(ctx, b.allowedChat, text, kb); err != nil {
 		b.log.Error("send nudge", "err", err)
@@ -352,27 +308,12 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 	_ = b.client.AnswerCallbackQuery(ctx, q.ID, toast)
 	_ = b.client.ClearKeyboard(ctx, chat, q.Message.MessageID)
 	if action == "do_it" {
-		b.reply(ctx, chat, "This is where the per-thought conversation will start (Phase 4). For now: pick the first step and go.")
+		b.reply(ctx, chat, "🚀  <i>This is where we'll talk it through, in a later version. For now: pick the first step and go.</i>")
 	}
 }
 
 func (b *Bot) reply(ctx context.Context, chat int64, text string) {
 	if _, err := b.client.SendMessage(ctx, chat, text, nil); err != nil {
 		b.log.Error("send", "err", err)
-	}
-}
-
-func humanType(t ai.ThoughtType) string {
-	switch t {
-	case ai.TypeActionable:
-		return "something to do"
-	case ai.TypeExperience:
-		return "an experience or interest"
-	case ai.TypeIdea:
-		return "an idea"
-	case ai.TypeDevelopment:
-		return "personal development"
-	default:
-		return "not sure yet"
 	}
 }
