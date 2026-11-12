@@ -41,3 +41,11 @@ a Phase 2 input. The cheap, reliable context is the user's own routine.
 work, days off), each skippable with a default, editable via `/routine`. Sleep is a hard gate.
 Work hours and days off adjust the opportunity score. From Phase 3, observed response times
 override stated hours. Never ask hour-by-hour detail.
+
+## 2026-11-12 — Postgres on Supabase Mumbai, Fly in Singapore, hand-written queries
+
+**Decision.** Supabase free tier in ap-south-1 through the session pooler (the free tier's
+direct connection is IPv6-only). Fly's Mumbai region is deprecated for new machines, so the
+API runs in `sin`, about 60 ms from the database. Queries are hand-written against pgx
+instead of generated with sqlc: fifteen queries did not justify a code-generation step.
+Migrations are embedded goose SQL files applied at startup, so every deploy migrates.

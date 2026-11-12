@@ -2,7 +2,7 @@
 # evaluator ticker (Phase 2) keeps running. Set secrets before first deploy:
 #   fly secrets set API_TOKEN=... ANTHROPIC_API_KEY=...
 app = "thought-companion-api"
-primary_region = "lhr"
+primary_region = "sin"
 
 [build]
 

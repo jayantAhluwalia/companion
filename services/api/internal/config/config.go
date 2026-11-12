@@ -1,5 +1,4 @@
 // Package config loads runtime configuration from environment variables.
-// Phase 0 keeps this deliberately small; DATABASE_URL arrives in Phase 1.
 package config
 
 import (
@@ -15,6 +14,8 @@ type Config struct {
 	Model          string
 	TelegramToken  string
 	TelegramChatID int64 // the one chat the bot serves; 0 until configured
+	DatabaseURL    string
+	BotEnabled     bool // false for local runs so two pollers never fight over one bot token
 }
 
 func Load() (Config, error) {
@@ -24,6 +25,8 @@ func Load() (Config, error) {
 		AnthropicKey:  os.Getenv("ANTHROPIC_API_KEY"),
 		Model:         getenv("ANTHROPIC_MODEL", "claude-opus-5-5"),
 		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
+		DatabaseURL:   os.Getenv("DATABASE_URL"),
+		BotEnabled:    getenv("BOT_ENABLED", "true") != "false",
 	}
 	if v := os.Getenv("TELEGRAM_CHAT_ID"); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
@@ -32,7 +35,10 @@ func Load() (Config, error) {
 		}
 		c.TelegramChatID = id
 	}
-	for name, v := range map[string]string{"API_TOKEN": c.APIToken, "ANTHROPIC_API_KEY": c.AnthropicKey, "TELEGRAM_BOT_TOKEN": c.TelegramToken} {
+	for name, v := range map[string]string{
+		"API_TOKEN": c.APIToken, "ANTHROPIC_API_KEY": c.AnthropicKey,
+		"TELEGRAM_BOT_TOKEN": c.TelegramToken, "DATABASE_URL": c.DatabaseURL,
+	} {
 		if v == "" {
 			return c, fmt.Errorf("%s must be set", name)
 		}
