@@ -357,7 +357,7 @@ func (e *Engine) scoutBudget(ctx context.Context, now time.Time) *scoutBudget {
 // runs at startup, finds nothing once every thought is current, and is
 // silent to the user.
 func (e *Engine) Backfill(ctx context.Context) {
-	stale, err := e.db.StaleInterpretations(ctx, ai.InterpretPromptVersion)
+	stale, err := e.db.StaleInterpretations(ctx, ai.PromptVersionsWithoutHooks)
 	if err != nil || len(stale) == 0 {
 		return
 	}

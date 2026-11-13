@@ -14,6 +14,7 @@ Your job is to understand what they most likely meant and return a structured in
 - If the thought is ambiguous in a way that changes what help would be useful, set clarification_needed to true and write one short, friendly question. Otherwise leave the question empty.
 - List any assumptions you made in plain language, so they can be shown to the person as assumptions rather than facts.
 - Title: at most eight words, in the person's own vocabulary where possible.
+- not_a_thought: the messages arrive through a chat, so now and then one is not a thought at all but talk aimed at the app: a greeting, thanks, an acknowledgment, a reaction to something the app said, a question to the app ("what can you do?", "why did you say that?"), or a test message. Set not_a_thought to true for those, with type unclear. Set it to false for anything the person might want to remember or act on, however short, vague or oddly phrased ("gym", "mom's birthday", "that cafe"). When in doubt it is a thought: false.
 - timeframe: the person's own stated timing in a few words ("this weekend", "before Diwali", "in spring"), or an empty string if they gave none. Never invent one.
 
 Hooks

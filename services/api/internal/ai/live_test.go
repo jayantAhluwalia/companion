@@ -55,13 +55,14 @@ func TestLiveFixtures(t *testing.T) {
 	defer file.Close()
 
 	type fixture struct {
-		Thought string   `json:"thought"`
-		Type    string   `json:"type"`
-		Hooks   []string `json:"hooks"`    // kinds that must be present
-		NoHooks bool     `json:"no_hooks"` // true = must have none
+		Thought    string   `json:"thought"`
+		Type       string   `json:"type"`
+		Hooks      []string `json:"hooks"`       // kinds that must be present
+		NoHooks    bool     `json:"no_hooks"`    // true = must have none
+		NotThought bool     `json:"not_thought"` // true = talk aimed at the bot, to be set aside
 	}
 	today := time.Now()
-	var total, typeOK, hookOK int
+	var total, typeOK, hookOK, keepOK int
 	var cost float64
 	sc := bufio.NewScanner(file)
 	for sc.Scan() {
@@ -85,6 +86,12 @@ func TestLiveFixtures(t *testing.T) {
 		for _, h := range got.Hooks {
 			kinds[h.Kind] = true
 		}
+		// The costly mistake is dropping a real thought, so this one is exact.
+		if got.NotAThought == f.NotThought {
+			keepOK++
+		} else {
+			t.Errorf("KEEP  %q: not_a_thought = %v, want %v", f.Thought, got.NotAThought, f.NotThought)
+		}
 		if string(got.Type) == f.Type {
 			typeOK++
 		} else {
@@ -104,7 +111,7 @@ func TestLiveFixtures(t *testing.T) {
 			t.Logf("HOOKS %q: want %v (none=%v), got %s", f.Thought, f.Hooks, f.NoHooks, raw)
 		}
 	}
-	t.Logf("types %d/%d, hooks %d/%d, cost $%.3f", typeOK, total, hookOK, total, cost)
+	t.Logf("types %d/%d, hooks %d/%d, thought-or-chatter %d/%d, cost $%.3f", typeOK, total, hookOK, total, keepOK, total, cost)
 	// Classification of spontaneous thoughts is fuzzy at the edges; the bar
 	// is a regression alarm, not a demand for perfection.
 	if float64(typeOK) < 0.85*float64(total) {

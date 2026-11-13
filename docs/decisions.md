@@ -83,3 +83,15 @@ migration 00003.
 
 **Decision.** Backfills take only the new fields (hooks, timeframe) and keep type, title and
 steps. The same applies to any future prompt upgrade.
+
+## 2026-11-13 — Not every message is a thought
+
+**Context.** Every non-command message was stored and interpreted, so "Okay thats fine"
+became thought #5.
+
+**Decision.** Two layers. A small word list catches plain acknowledgments, greetings and
+emoji-only messages before anything is saved: free and instant. Everything else goes to the
+interpreter (`interpret_v3`), which now also returns `not_a_thought` for talk aimed at the bot;
+those are archived with a "Keep it as a thought" button. The list is kept small on purpose and
+the prompt says "when in doubt it is a thought", because dropping a real thought is the worse
+error. The fixture test fails on any thought-or-chatter mistake.

@@ -316,12 +316,12 @@ func (s *Store) LLMCallsSince(ctx context.Context, purpose string, since time.Ti
 	return n, err
 }
 
-// StaleInterpretations lists active thoughts whose AI interpretation predates
-// the given prompt version, so they can be re-read once to gain hooks.
-func (s *Store) StaleInterpretations(ctx context.Context, promptVersion string) ([]Thought, error) {
+// StaleInterpretations lists active thoughts whose AI interpretation was
+// written by one of the given prompt versions, so they can be re-read once.
+func (s *Store) StaleInterpretations(ctx context.Context, staleVersions []string) ([]Thought, error) {
 	rows, err := s.pool.Query(ctx, thoughtSelect+`
-		where t.status in ('active', 'snoozed') and i.source = 'ai' and coalesce(i.prompt_version, '') <> $1
-		order by t.id`, promptVersion)
+		where t.status in ('active', 'snoozed') and i.source = 'ai' and coalesce(i.prompt_version, '') = any($1)
+		order by t.id`, staleVersions)
 	if err != nil {
 		return nil, err
 	}

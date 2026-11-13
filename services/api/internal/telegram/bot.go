@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"companion/api/internal/ai"
 	"companion/api/internal/engine"
@@ -160,6 +161,9 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 		b.reply(ctx, chat, fmt.Sprintf("💸  <b>This month</b>\n%d AI calls · about $%.2f", n, cost))
 	case strings.HasPrefix(cmd, "/"):
 		b.reply(ctx, chat, "🤷  I don't know that one. Just send me a thought, or /list.")
+	case isChatter(text):
+		// "ok", "thanks", a lone emoji: answer, but remember nothing.
+		b.reply(ctx, chat, "🙂  <i>Not saved. Send me a thought whenever one comes up.</i>")
 	default:
 		b.captureThought(ctx, user, text)
 	}
@@ -212,9 +216,59 @@ func (b *Bot) interpret(user store.User, thoughtID int64, raw, clarification str
 		b.log.Error("store interpretation", "err", err, "thought", thoughtID)
 		return
 	}
-	b.log.Info("interpreted", "thought", thoughtID, "version", stored.Version, "type", interp.Type,
+	b.log.Info("interpreted", "thought", thoughtID, "version", stored.Version, "type", interp.Type, "not_a_thought", interp.NotAThought,
 		"confidence", interp.Confidence, "hooks", len(interp.Hooks), "in", info.InputTokens, "out", info.OutputTokens, "ms", info.Latency.Milliseconds())
+
+	// Talk aimed at the bot is set aside rather than kept, with a way back
+	// in case the reading was wrong. A clarified thought is never set aside:
+	// the user has just told us it matters.
+	if interp.NotAThought && clarification == "" {
+		_ = b.db.AddEvent(ctx, thoughtID, nil, "not_a_thought", nil)
+		if err := b.db.SetStatus(ctx, thoughtID, "archived", nil); err != nil {
+			b.log.Error("set aside", "err", err, "thought", thoughtID)
+		}
+		kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{{
+			{Text: "📌 Keep it as a thought", CallbackData: fmt.Sprintf("keep:%d", thoughtID)},
+		}}}
+		text := "💬  That read like a message to me rather than something to remember, so I set it aside.\n<i>I can't hold a conversation yet. /list, /why and /routine are what I can show you.</i>"
+		if _, err := b.client.SendMessage(ctx, user.TelegramChatID, text, kb); err != nil {
+			b.log.Error("send set-aside", "err", err)
+		}
+		return
+	}
 	b.sendInterpretation(ctx, user.TelegramChatID, thoughtID, interp)
+}
+
+// chatter is the set of messages that are plainly talk, not thoughts. It is
+// deliberately small: anything not on it goes to the interpreter, which
+// makes the subtler call. A wrongly dropped thought is worse than an extra
+// model call.
+var chatter = map[string]bool{
+	"ok": true, "okay": true, "k": true, "kk": true, "okk": true, "ok thanks": true, "ok thank you": true, "okay thanks": true,
+	"thanks": true, "thank you": true, "thankyou": true, "thx": true, "ty": true, "thanks a lot": true, "thank you so much": true,
+	"cool": true, "nice": true, "great": true, "good": true, "awesome": true, "perfect": true, "wow": true, "super": true,
+	"got it": true, "noted": true, "sure": true, "fine": true, "alright": true, "right": true, "np": true, "no problem": true,
+	"yes": true, "no": true, "yep": true, "yeah": true, "yup": true, "nope": true, "nah": true, "haan": true, "nahi": true, "theek hai": true, "thik hai": true, "accha": true, "acha": true,
+	"hi": true, "hello": true, "hey": true, "hii": true, "yo": true, "bye": true, "good morning": true, "good night": true, "gm": true, "gn": true,
+	"hmm": true, "hm": true, "hmmm": true, "lol": true, "haha": true, "hahaha": true, "test": true, "testing": true,
+	"thats fine": true, "ok thats fine": true, "okay thats fine": true, "its fine": true, "all good": true, "sounds good": true,
+	"ok cool": true, "okay cool": true, "ok great": true, "okay great": true, "ok good": true, "ok nice": true, "ok got it": true, "okay got it": true,
+}
+
+// isChatter reports whether a message is an acknowledgment, a greeting or
+// only emoji and punctuation.
+func isChatter(text string) bool {
+	var sb strings.Builder
+	for _, r := range strings.ToLower(text) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			sb.WriteRune(r)
+		case unicode.IsSpace(r):
+			sb.WriteRune(' ')
+		}
+	}
+	words := strings.Join(strings.Fields(sb.String()), " ")
+	return words == "" || chatter[words]
 }
 
 func (b *Bot) sendInterpretation(ctx context.Context, chat int64, thoughtID int64, i ai.Interpretation) {
@@ -317,6 +371,14 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 			_ = b.db.Touch(ctx, id)
 		}
 		_ = b.client.ClearKeyboard(ctx, chat, msgID)
+	case "keep":
+		toast = "Couldn't find it."
+		if t, err := b.db.GetThought(ctx, user.ID, id); err == nil && t.Interpretation != nil {
+			if err := b.db.SetStatus(ctx, id, "active", nil); err == nil {
+				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(id, t.Interpretation.Interpretation))
+				toast = "Kept."
+			}
+		}
 	case "wrong", "ct", "cn", "cx":
 		toast = b.correction(ctx, user, action, id, parts[2], msgID)
 	case "do_it", "next_steps", "later", "not_interested":

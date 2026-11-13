@@ -28,3 +28,9 @@
 {"thought": "read more books, at least one a month", "type": "personal_development"}
 {"thought": "finish the system design course I bought", "type": "personal_development", "hooks": ["free_time"]}
 {"thought": "that thing with the blue", "type": "unclear", "no_hooks": true}
+{"thought": "what can you do?", "type": "unclear", "not_thought": true, "no_hooks": true}
+{"thought": "haha that was a good one", "type": "unclear", "not_thought": true, "no_hooks": true}
+{"thought": "why did you nudge me about that just now", "type": "unclear", "not_thought": true, "no_hooks": true}
+{"thought": "are you working?", "type": "unclear", "not_thought": true, "no_hooks": true}
+{"thought": "gym", "type": "personal_development"}
+{"thought": "mom's birthday gift", "type": "actionable_intention"}

@@ -11,10 +11,14 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/v2"
 )
 
-//go:embed prompts/interpret_v2.md
+//go:embed prompts/interpret_v3.md
 var interpretPrompt string
 
-const InterpretPromptVersion = "interpret_v2"
+const InterpretPromptVersion = "interpret_v3"
+
+// PromptVersionsWithoutHooks are the versions whose stored readings need a
+// re-read to gain hooks. Later versions only refine; they do not trigger one.
+var PromptVersionsWithoutHooks = []string{"interpret_v1"}
 
 // ThoughtType is the closed set of classifications from the discovery doc,
 // plus "unclear" for low-confidence results that should not be nudged.
@@ -84,6 +88,10 @@ type Interpretation struct {
 	Assumptions           []string    `json:"assumptions"`
 	Timeframe             string      `json:"timeframe"`
 	Hooks                 []Hook      `json:"hooks"`
+	// NotAThought is true when the message was talk aimed at the bot (a
+	// greeting, thanks, a question) rather than something to remember. It is
+	// acted on at capture and not stored.
+	NotAThought bool `json:"not_a_thought"`
 }
 
 func str() map[string]any { return map[string]any{"type": "string"} }
@@ -126,6 +134,7 @@ var interpretSchema = object(map[string]any{
 	"clarification_question": str(),
 	"assumptions":            array(str()),
 	"timeframe":              str(),
+	"not_a_thought":          map[string]any{"type": "boolean"},
 	"hooks": array(object(map[string]any{
 		"kind":     enum(HookWeather, HookWeb, HookDate, HookFreeTime),
 		"why":      str(),

@@ -27,3 +27,17 @@ func TestParseRange(t *testing.T) {
 		}
 	}
 }
+
+func TestIsChatter(t *testing.T) {
+	for _, s := range []string{"ok", "OK!", "Thanks 🙏", "thank you.", "👍", "🙂🙂", "...", "Got it", "hmm", "Good morning!", "theek hai", "Okay thats fine", "Okay, that's fine.", "sounds good"} {
+		if !isChatter(s) {
+			t.Errorf("%q should be treated as chatter", s)
+		}
+	}
+	// Short is not the same as empty: these must reach the interpreter.
+	for _, s := range []string{"gym", "ok so I need to buy milk", "thanks giving dinner plan", "call mom", "good shoes for running", "test the new bike", "no sugar for a month"} {
+		if isChatter(s) {
+			t.Errorf("%q is a thought and must not be dropped", s)
+		}
+	}
+}
