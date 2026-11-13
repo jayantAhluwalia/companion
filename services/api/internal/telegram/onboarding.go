@@ -143,6 +143,9 @@ func (b *Bot) onboardingAnswer(ctx context.Context, user store.User, chain bool,
 // next moves a chained onboarding forward, or shows the summary.
 func (b *Bot) next(ctx context.Context, user store.User, answered string, chain bool, value string) {
 	if !chain {
+		// Changing a setting from /routine also counts as being set up, so
+		// /start never re-asks questions that were answered one by one.
+		_ = b.db.MarkOnboarded(ctx, user.ID)
 		b.routine(ctx, user)
 		return
 	}
@@ -198,7 +201,7 @@ func (b *Bot) onboardingTyped(ctx context.Context, user store.User, p store.Pend
 		place, err := b.weather.Geocode(gctx, text)
 		cancel()
 		if errors.Is(err, signals.ErrNoSuchPlace) {
-			retry("🤔  I couldn't find a place called “" + Esc(clip(text, 40)) + "”. Try the nearest city.")
+			retry("🤔  I couldn't place “" + Esc(clip(text, 40)) + "”. Try just the town or city name.")
 			return
 		}
 		if err != nil {
@@ -206,10 +209,7 @@ func (b *Bot) onboardingTyped(ctx context.Context, user store.User, p store.Pend
 			retry("The place lookup is not answering. Try again in a moment.")
 			return
 		}
-		label := place.Name
-		if place.Country != "" {
-			label += ", " + place.Country
-		}
+		label := place.Label()
 		if err := b.db.SetHome(ctx, user.ID, label, place.CountryCode, place.Lat, place.Lon, place.Timezone); err != nil {
 			b.log.Error("save home", "err", err)
 			b.reply(ctx, chat, "Couldn't save that.")
