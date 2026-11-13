@@ -15,7 +15,9 @@ type Config struct {
 	TelegramToken  string
 	TelegramChatID int64 // the one chat the bot serves; 0 until configured
 	DatabaseURL    string
-	BotEnabled     bool // false for local runs so two pollers never fight over one bot token
+	BotEnabled     bool    // false for local runs so two pollers never fight over one bot token
+	MonthlyBudget  float64 // USD of model spend after which the engine stops calling the model
+	ScoutsPerDay   int     // web lookups per day, the one expensive signal
 }
 
 func Load() (Config, error) {
@@ -27,6 +29,22 @@ func Load() (Config, error) {
 		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 		DatabaseURL:   os.Getenv("DATABASE_URL"),
 		BotEnabled:    getenv("BOT_ENABLED", "true") != "false",
+		MonthlyBudget: 15,
+		ScoutsPerDay:  2,
+	}
+	if v := os.Getenv("MONTHLY_BUDGET_USD"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 {
+			return c, fmt.Errorf("MONTHLY_BUDGET_USD must be a positive number")
+		}
+		c.MonthlyBudget = f
+	}
+	if v := os.Getenv("SCOUTS_PER_DAY"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return c, fmt.Errorf("SCOUTS_PER_DAY must be a non-negative integer")
+		}
+		c.ScoutsPerDay = n
 	}
 	if v := os.Getenv("TELEGRAM_CHAT_ID"); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)

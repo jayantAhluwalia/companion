@@ -151,6 +151,22 @@ func (c *Client) ClearKeyboard(ctx context.Context, chatID, messageID int64) err
 	}, nil)
 }
 
+// EditKeyboard swaps the inline buttons under an existing message.
+func (c *Client) EditKeyboard(ctx context.Context, chatID, messageID int64, keyboard InlineKeyboardMarkup) error {
+	return c.call(ctx, "editMessageReplyMarkup", map[string]any{
+		"chat_id": chatID, "message_id": messageID, "reply_markup": keyboard,
+	}, nil)
+}
+
+// EditText replaces a message's text and removes its buttons, so an
+// answered question reads as a record of the answer.
+func (c *Client) EditText(ctx context.Context, chatID, messageID int64, text string) error {
+	return c.call(ctx, "editMessageText", map[string]any{
+		"chat_id": chatID, "message_id": messageID, "text": text, "parse_mode": "HTML",
+		"link_preview_options": map[string]any{"is_disabled": true},
+	}, nil)
+}
+
 func (c *Client) SetMyCommands(ctx context.Context, cmds []BotCommand) error {
 	return c.call(ctx, "setMyCommands", map[string]any{"commands": cmds}, nil)
 }

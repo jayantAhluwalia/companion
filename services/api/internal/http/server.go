@@ -1,6 +1,6 @@
 // Package http exposes the admin/debug API. The user-facing surface is the
-// Telegram bot; these endpoints exist for curl-driven testing and, later,
-// the manual evaluator trigger.
+// Telegram bot; these endpoints exist for curl-driven testing and for
+// triggering the nudge engine by hand.
 package http
 
 import (
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"companion/api/internal/ai"
+	"companion/api/internal/engine"
 	"companion/api/internal/telegram"
 )
 
@@ -31,7 +32,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"ok": "true"}) })
 	mux.Handle("POST /v1/ai/interpret", s.auth(http.HandlerFunc(s.interpret)))
-	mux.Handle("POST /v1/admin/nudge", s.auth(http.HandlerFunc(s.sampleNudge)))
+	mux.Handle("POST /v1/admin/nudge", s.auth(http.HandlerFunc(s.evaluate)))
+	mux.Handle("POST /v1/admin/evaluate", s.auth(http.HandlerFunc(s.evaluate)))
 	return s.logging(mux)
 }
 
@@ -65,7 +67,7 @@ func (s *Server) interpret(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	out, info, err := s.ai.Interpret(ctx, in.RawContent, time.Now())
+	out, info, err := s.ai.Interpret(ctx, in.RawContent, ai.InterpretContext{Today: time.Now()})
 	if err != nil {
 		s.log.Error("interpret failed", "err", err, "stop", info.StopReason)
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
@@ -74,15 +76,28 @@ func (s *Server) interpret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"interpretation": out, "call": info})
 }
 
-// sampleNudge lets a curl call push a message to the user's chat, the same
-// path the evaluator will use in Phase 2.
-func (s *Server) sampleNudge(w http.ResponseWriter, r *http.Request) {
-	if s.bot.AllowedChat() == 0 {
-		writeJSON(w, 409, map[string]string{"error": "TELEGRAM_CHAT_ID not configured"})
+// evaluate runs the nudge engine once, now.
+//
+//	POST /v1/admin/evaluate            a normal check: gates, cooldowns and the score bar apply
+//	POST /v1/admin/evaluate?dry=1      decide and log, but send nothing
+//	POST /v1/admin/evaluate?force=1    skip the gates, as /nudge does
+//	POST /v1/admin/nudge               same as force=1
+func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	opt := engine.Options{
+		Trigger: "manual",
+		Force:   q.Get("force") == "1" || strings.HasSuffix(r.URL.Path, "/nudge"),
+		DryRun:  q.Get("dry") == "1",
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	res, err := s.bot.EvaluateNow(ctx, opt)
+	if err != nil {
+		s.log.Error("evaluate", "err", err)
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
-	s.bot.SendSampleNudge(r.Context())
-	writeJSON(w, 200, map[string]string{"status": "sent"})
+	writeJSON(w, 200, res)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -10,22 +10,27 @@ import (
 	"time"
 
 	"companion/api/internal/ai"
+	"companion/api/internal/engine"
+	"companion/api/internal/signals"
 	"companion/api/internal/store"
 )
 
 // Bot runs the long-polling loop and the user-facing behaviour:
 // capture -> instant ack -> async interpretation -> reply with buttons,
-// plus the status commands. Everything is persisted through the store.
+// plus onboarding, corrections, status commands and nudge delivery.
+// Everything is persisted through the store.
 type Bot struct {
 	client      *Client
 	ai          *ai.Client
 	db          *store.Store
+	eng         *engine.Engine
+	weather     *signals.Weather
 	log         *slog.Logger
 	allowedChat int64 // 0 = not locked yet; the bot then only tells callers their id
 }
 
-func NewBot(client *Client, aiClient *ai.Client, db *store.Store, allowedChat int64, log *slog.Logger) *Bot {
-	return &Bot{client: client, ai: aiClient, db: db, log: log, allowedChat: allowedChat}
+func NewBot(client *Client, aiClient *ai.Client, db *store.Store, eng *engine.Engine, weather *signals.Weather, allowedChat int64, log *slog.Logger) *Bot {
+	return &Bot{client: client, ai: aiClient, db: db, eng: eng, weather: weather, log: log, allowedChat: allowedChat}
 }
 
 // AllowedChat is the chat the bot will proactively message (nudges).
@@ -40,14 +45,17 @@ func (b *Bot) Run(ctx context.Context) {
 		b.log.Error("telegram getMe failed", "err", err)
 	}
 	_ = b.client.SetMyCommands(ctx, []BotCommand{
-		{Command: "start", Description: "What this bot does"},
 		{Command: "list", Description: "Your active thoughts"},
+		{Command: "nudge", Description: "Pick the best thing to bring up right now"},
+		{Command: "why", Description: "Why I did or didn't nudge you"},
+		{Command: "routine", Description: "Sleep, work hours, days off, city"},
 		{Command: "done", Description: "/done 12 — mark thought 12 done"},
 		{Command: "snooze", Description: "/snooze 12 7 — quiet for 7 days (default 3)"},
 		{Command: "drop", Description: "/drop 12 — no longer relevant"},
-		{Command: "nudge", Description: "Send yourself a sample nudge"},
+		{Command: "pause", Description: "Stop nudges until /resume"},
+		{Command: "resume", Description: "Turn nudges back on"},
 		{Command: "cost", Description: "This month's AI spend"},
-		{Command: "id", Description: "Show this chat's id"},
+		{Command: "start", Description: "What this bot does"},
 	})
 
 	var offset int64
@@ -103,10 +111,23 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 		return
 	}
 
+	// A typed answer to a question the bot just asked is not a new thought.
+	// Any command abandons the question.
+	pending, err := b.db.TakePending(ctx, user.ID)
+	if err != nil {
+		b.log.Warn("pending", "err", err)
+	}
+	if pending != nil && !strings.HasPrefix(text, "/") {
+		b.handlePending(ctx, user, *pending, text)
+		return
+	}
+
 	cmd, arg, _ := strings.Cut(text, " ")
 	switch {
 	case cmd == "/start":
-		b.reply(ctx, chat, "👋  <b>Hi. I'm your companion.</b>\n\nSend me anything on your mind: something you want to do, try, learn or look into. I'll remember it and, later, help you act on it.\n\nNo need to organise anything. Just type it.\n\n<i>/list shows what I'm holding.</i>")
+		b.start(ctx, user)
+	case cmd == "/cancel":
+		b.reply(ctx, chat, "👌  Cancelled.")
 	case cmd == "/id":
 		b.reply(ctx, chat, fmt.Sprintf("Chat id: %d", chat))
 	case cmd == "/list":
@@ -114,19 +135,43 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 	case cmd == "/done" || cmd == "/drop" || cmd == "/snooze":
 		b.statusCommand(ctx, user, cmd, arg)
 	case cmd == "/nudge":
-		b.SendSampleNudge(ctx)
+		b.nudgeNow(ctx, user)
+	case cmd == "/why":
+		b.why(ctx, user)
+	case cmd == "/routine":
+		b.routine(ctx, user)
+	case cmd == "/pause" || cmd == "/resume":
+		on := cmd == "/resume"
+		if err := b.db.SetNotifications(ctx, user.ID, on); err != nil {
+			b.log.Error("set notifications", "err", err)
+			return
+		}
+		if on {
+			b.reply(ctx, chat, "🔔  Nudges are back on.")
+		} else {
+			b.reply(ctx, chat, "🔕  Nudges paused. I'll keep collecting your thoughts.\n<i>/resume turns them back on.</i>")
+		}
 	case cmd == "/cost":
 		cost, n, err := b.db.MonthlyCostUSD(ctx)
 		if err != nil {
 			b.reply(ctx, chat, "Couldn't read the cost log.")
 			return
 		}
-		b.reply(ctx, chat, fmt.Sprintf("💸  <b>This month</b>\n%d AI calls · about $%.3f", n, cost))
+		b.reply(ctx, chat, fmt.Sprintf("💸  <b>This month</b>\n%d AI calls · about $%.2f", n, cost))
 	case strings.HasPrefix(cmd, "/"):
 		b.reply(ctx, chat, "🤷  I don't know that one. Just send me a thought, or /list.")
 	default:
 		b.captureThought(ctx, user, text)
 	}
+}
+
+// userNow is the current time in the user's own timezone.
+func userNow(u store.User) time.Time {
+	loc, err := time.LoadLocation(u.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	return time.Now().In(loc)
 }
 
 // captureThought follows product principle 1: save and acknowledge instantly,
@@ -139,30 +184,37 @@ func (b *Bot) captureThought(ctx context.Context, user store.User, raw string) {
 		return
 	}
 	b.reply(ctx, user.TelegramChatID, "✍️  Got it.")
+	go b.interpret(user, t.ID, raw, "")
+}
 
-	go func() {
-		ictx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		interp, info, err := b.ai.Interpret(ictx, raw, time.Now())
-		_ = b.db.LogLLMCall(ictx, store.LLMCall{
-			UserID: &user.ID, ThoughtID: &t.ID, Purpose: "interpret", Model: info.Model, PromptVer: info.PromptVersion,
-			InputTokens: info.InputTokens, OutputTokens: info.OutputTokens, CostUSD: info.CostUSD(),
-			Latency: info.Latency, StopReason: info.StopReason, Err: err,
-		})
-		if err != nil {
-			b.log.Error("interpret", "err", err, "thought", t.ID)
-			b.reply(ictx, user.TelegramChatID, "Saved. I couldn't make sense of it just now, so I'll keep your original wording.")
-			return
-		}
-		stored, err := b.db.AddInterpretation(ictx, t.ID, "ai", interp, info.Model, info.PromptVersion)
-		if err != nil {
-			b.log.Error("store interpretation", "err", err, "thought", t.ID)
-			return
-		}
-		b.log.Info("interpreted", "thought", t.ID, "version", stored.Version, "type", interp.Type,
-			"confidence", interp.Confidence, "in", info.InputTokens, "out", info.OutputTokens, "ms", info.Latency.Milliseconds())
-		b.sendInterpretation(ictx, user.TelegramChatID, t.ID, interp)
-	}()
+// interpret reads a thought (optionally with the user's clarification),
+// stores the result as a new version and shows it.
+func (b *Bot) interpret(user store.User, thoughtID int64, raw, clarification string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	home := ""
+	if p, err := b.db.GetPrefs(ctx, user.ID); err == nil {
+		home = p.HomeCity
+	}
+	interp, info, err := b.ai.Interpret(ctx, raw, ai.InterpretContext{Today: userNow(user), Home: home, Clarification: clarification})
+	_ = b.db.LogLLMCall(ctx, store.LLMCall{
+		UserID: &user.ID, ThoughtID: &thoughtID, Purpose: "interpret", Model: info.Model, PromptVer: info.PromptVersion,
+		InputTokens: info.InputTokens, OutputTokens: info.OutputTokens, CostUSD: info.CostUSD(),
+		Latency: info.Latency, StopReason: info.StopReason, Err: err,
+	})
+	if err != nil {
+		b.log.Error("interpret", "err", err, "thought", thoughtID)
+		b.reply(ctx, user.TelegramChatID, "Saved. I couldn't make sense of it just now, so I'll keep your original wording.")
+		return
+	}
+	stored, err := b.db.AddInterpretation(ctx, thoughtID, "ai", interp, info.Model, info.PromptVersion)
+	if err != nil {
+		b.log.Error("store interpretation", "err", err, "thought", thoughtID)
+		return
+	}
+	b.log.Info("interpreted", "thought", thoughtID, "version", stored.Version, "type", interp.Type,
+		"confidence", interp.Confidence, "hooks", len(interp.Hooks), "in", info.InputTokens, "out", info.OutputTokens, "ms", info.Latency.Milliseconds())
+	b.sendInterpretation(ctx, user.TelegramChatID, thoughtID, interp)
 }
 
 func (b *Bot) sendInterpretation(ctx context.Context, chat int64, thoughtID int64, i ai.Interpretation) {
@@ -236,80 +288,48 @@ func (b *Bot) statusCommand(ctx context.Context, user store.User, cmd, arg strin
 	}
 }
 
-// SendSampleNudge proves the proactive path with the latest interpreted
-// thought. The Phase 2 evaluator replaces the "latest" choice with scoring.
-func (b *Bot) SendSampleNudge(ctx context.Context) {
-	if b.allowedChat == 0 {
-		return
-	}
-	user, err := b.db.GetOrCreateUser(ctx, b.allowedChat, "")
-	if err != nil {
-		return
-	}
-	t, err := b.db.LatestInterpreted(ctx, user.ID)
-	text := "👋  <b>Sample nudge</b>\nThis is what a proactive check-in will look like."
-	var id int64
-	if err == nil && t.Interpretation != nil {
-		id = t.ID
-		step := "a small first step"
-		if len(t.Interpretation.NextSteps) > 0 {
-			step = t.Interpretation.NextSteps[0].Label
-		}
-		text = formatNudge(t.Interpretation.Title, step)
-	}
-	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
-		{{Text: "🚀 Let's do it", CallbackData: fmt.Sprintf("do_it:%d", id)}, {Text: "📝 Next steps", CallbackData: fmt.Sprintf("next_steps:%d", id)}},
-		{{Text: "⏰ Later", CallbackData: fmt.Sprintf("later:%d", id)}, {Text: "🙅 Not interested", CallbackData: fmt.Sprintf("not_interested:%d", id)}},
-	}}
-	if _, err := b.client.SendMessage(ctx, b.allowedChat, text, kb); err != nil {
-		b.log.Error("send nudge", "err", err)
-	}
-}
-
 func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 	if q.Message == nil || !b.allowed(q.Message.Chat.ID) {
 		_ = b.client.AnswerCallbackQuery(ctx, q.ID, "")
 		return
 	}
-	action, idText, _ := strings.Cut(q.Data, ":")
-	id, _ := strconv.ParseInt(idText, 10, 64)
-	chat := q.Message.Chat.ID
+	chat, msgID := q.Message.Chat.ID, q.Message.MessageID
+	user, err := b.db.GetOrCreateUser(ctx, chat, "")
+	if err != nil {
+		_ = b.client.AnswerCallbackQuery(ctx, q.ID, "Something went wrong.")
+		return
+	}
+	// Callback data is "action:arg1:arg2:arg3"; the last part may itself
+	// contain colons (times like 23:00-07:00).
+	parts := strings.SplitN(q.Data, ":", 4)
+	for len(parts) < 4 {
+		parts = append(parts, "")
+	}
+	action := parts[0]
+	id, _ := strconv.ParseInt(parts[1], 10, 64)
+	b.log.Info("callback", "action", action, "data", q.Data)
 
 	toast := "Noted."
-	var dbErr error
 	switch action {
 	case "ok":
 		toast = "Thanks, noted."
-		dbErr = b.db.AddEvent(ctx, id, nil, "interpretation_confirmed", nil)
-	case "wrong":
-		toast = "Noted. Correcting it arrives in the next version."
-		dbErr = b.db.AddEvent(ctx, id, nil, "interpretation_flagged", nil)
-	case "do_it":
-		toast = "Nice. Let's go."
-		dbErr = b.db.AddEvent(ctx, id, nil, "nudge_do_it", nil)
-	case "next_steps":
-		toast = "Steps are in the message above."
-		dbErr = b.db.AddEvent(ctx, id, nil, "nudge_next_steps", nil)
-	case "later":
-		toast = "No problem. Quiet for three days."
-		until := time.Now().Add(72 * time.Hour)
-		dbErr = b.db.SetStatus(ctx, id, "snoozed", &until)
-	case "not_interested":
-		toast = "Understood. I won't bring this one up again."
-		dbErr = b.db.SetStatus(ctx, id, "archived", nil)
+		if err := b.db.AddEvent(ctx, id, nil, "interpretation_confirmed", nil); err == nil {
+			_ = b.db.Touch(ctx, id)
+		}
+		_ = b.client.ClearKeyboard(ctx, chat, msgID)
+	case "wrong", "ct", "cn", "cx":
+		toast = b.correction(ctx, user, action, id, parts[2], msgID)
+	case "do_it", "next_steps", "later", "not_interested":
+		nudgeID, _ := strconv.ParseInt(parts[2], 10, 64)
+		toast = b.nudgeResponse(ctx, user, action, id, nudgeID)
+		_ = b.client.ClearKeyboard(ctx, chat, msgID)
+	case "ob":
+		toast = b.onboardingAnswer(ctx, user, parts[1] == "c", parts[2], parts[3], msgID)
+	case "rt":
+		toast = ""
+		b.ask(ctx, user, parts[1], false)
 	}
-	if id != 0 && dbErr == nil {
-		_ = b.db.Touch(ctx, id)
-	}
-	if dbErr != nil && !errors.Is(dbErr, store.ErrNotFound) {
-		b.log.Error("callback persist", "err", dbErr, "action", action, "thought", id)
-	}
-	b.log.Info("callback", "action", action, "thought", id)
 	_ = b.client.AnswerCallbackQuery(ctx, q.ID, toast)
-	_ = b.client.ClearKeyboard(ctx, chat, q.Message.MessageID)
-	if action == "do_it" {
-		b.reply(ctx, chat, "🚀  <i>This is where we'll talk it through, in a later version. For now: pick the first step and go.</i>")
-	}
 }
 
 func (b *Bot) reply(ctx context.Context, chat int64, text string) {

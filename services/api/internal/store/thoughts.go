@@ -63,6 +63,10 @@ func (s *Store) AddInterpretation(ctx context.Context, thoughtID int64, source s
 	if in.Assumptions == nil {
 		assumptions = []byte("[]")
 	}
+	hooks, _ := json.Marshal(in.Hooks)
+	if in.Hooks == nil {
+		hooks = []byte("[]")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Interpretation{}, err
@@ -73,12 +77,14 @@ func (s *Store) AddInterpretation(ctx context.Context, thoughtID int64, source s
 	err = tx.QueryRow(ctx, `
 		insert into thought_interpretations
 		  (thought_id, version, source, type, title, description, desired_outcome, next_steps,
-		   confidence, clarification_needed, clarification_question, assumptions, model, prompt_version)
+		   confidence, clarification_needed, clarification_question, assumptions, model, prompt_version,
+		   timeframe, hooks)
 		values ($1, (select coalesce(max(version), 0) + 1 from thought_interpretations where thought_id = $1),
-		        $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, nullif($12, ''), nullif($13, ''))
+		        $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, nullif($12, ''), nullif($13, ''), $14, $15)
 		returning id, version, created_at`,
 		thoughtID, source, string(in.Type), in.Title, in.Description, in.DesiredOutcome, steps,
 		in.Confidence, in.ClarificationNeeded, in.ClarificationQuestion, assumptions, model, promptVersion,
+		in.Timeframe, hooks,
 	).Scan(&out.ID, &out.Version, &out.CreatedAt)
 	if err != nil {
 		return out, err
@@ -130,7 +136,7 @@ const thoughtSelect = `
 	       t.last_nudged_at, t.nudge_count, t.ignored_streak,
 	       i.id, i.version, i.source, coalesce(i.model, ''), coalesce(i.prompt_version, ''), i.created_at,
 	       i.type, i.title, i.description, i.desired_outcome, i.next_steps, i.confidence,
-	       i.clarification_needed, i.clarification_question, i.assumptions
+	       i.clarification_needed, i.clarification_question, i.assumptions, i.timeframe, i.hooks
 	  from thoughts t
 	  left join thought_interpretations i on i.id = t.current_interpretation_id`
 
@@ -138,15 +144,15 @@ func scanThought(row pgx.Row) (Thought, error) {
 	var t Thought
 	var iID *int64
 	var iVersion *int
-	var iSource, iModel, iPrompt, iType, iTitle, iDesc, iOutcome, iQuestion *string
+	var iSource, iModel, iPrompt, iType, iTitle, iDesc, iOutcome, iQuestion, iTimeframe *string
 	var iCreated *time.Time
-	var iSteps, iAssumptions []byte
+	var iSteps, iAssumptions, iHooks []byte
 	var iConf *float64
 	var iClar *bool
 	err := row.Scan(&t.ID, &t.UserID, &t.RawContent, &t.Status, &t.SnoozedUntil, &t.CreatedAt, &t.LastTouchedAt,
 		&t.LastNudgedAt, &t.NudgeCount, &t.IgnoredStreak,
 		&iID, &iVersion, &iSource, &iModel, &iPrompt, &iCreated,
-		&iType, &iTitle, &iDesc, &iOutcome, &iSteps, &iConf, &iClar, &iQuestion, &iAssumptions)
+		&iType, &iTitle, &iDesc, &iOutcome, &iSteps, &iConf, &iClar, &iQuestion, &iAssumptions, &iTimeframe, &iHooks)
 	if err != nil {
 		return t, err
 	}
@@ -157,6 +163,8 @@ func scanThought(row pgx.Row) (Thought, error) {
 		in.Confidence, in.ClarificationNeeded, in.ClarificationQuestion = *iConf, *iClar, *iQuestion
 		_ = json.Unmarshal(iSteps, &in.NextSteps)
 		_ = json.Unmarshal(iAssumptions, &in.Assumptions)
+		_ = json.Unmarshal(iHooks, &in.Hooks)
+		in.Timeframe = *iTimeframe
 		t.Interpretation = &in
 	}
 	return t, nil
@@ -190,17 +198,6 @@ func (s *Store) ListThoughts(ctx context.Context, userID int64, statuses []strin
 	return out, rows.Err()
 }
 
-// LatestInterpreted is what the sample nudge uses until the evaluator exists.
-func (s *Store) LatestInterpreted(ctx context.Context, userID int64) (Thought, error) {
-	t, err := scanThought(s.pool.QueryRow(ctx, thoughtSelect+`
-		where t.user_id = $1 and t.status = 'active' and t.current_interpretation_id is not null
-		order by t.created_at desc limit 1`, userID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return t, ErrNotFound
-	}
-	return t, err
-}
-
 type LLMCall struct {
 	UserID       *int64
 	ThoughtID    *int64
@@ -209,6 +206,7 @@ type LLMCall struct {
 	PromptVer    string
 	InputTokens  int64
 	OutputTokens int64
+	WebSearches  int64
 	CostUSD      float64
 	Latency      time.Duration
 	StopReason   string
@@ -223,10 +221,10 @@ func (s *Store) LogLLMCall(ctx context.Context, c LLMCall) error {
 	}
 	_, err := s.pool.Exec(ctx, `
 		insert into llm_calls (user_id, thought_id, purpose, model, prompt_version, input_tokens, output_tokens,
-		                       cost_usd, latency_ms, stop_reason, error)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, nullif($10, ''), $11)`,
+		                       cost_usd, latency_ms, stop_reason, error, web_searches)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, nullif($10, ''), $11, $12)`,
 		c.UserID, c.ThoughtID, c.Purpose, c.Model, c.PromptVer, c.InputTokens, c.OutputTokens,
-		c.CostUSD, c.Latency.Milliseconds(), c.StopReason, errText)
+		c.CostUSD, c.Latency.Milliseconds(), c.StopReason, errText, c.WebSearches)
 	if err != nil {
 		return fmt.Errorf("log llm call: %w", err)
 	}

@@ -8,10 +8,13 @@ var pricing = map[string][2]float64{
 	"claude-haiku-5-5":  {0.10, 0.50},
 }
 
+// webSearchUSD is the per-search fee on top of tokens ($10 per 1,000).
+const webSearchUSD = 0.01
+
 func (c CallInfo) CostUSD() float64 {
-	p, ok := pricing[c.Model]
-	if !ok {
-		return 0
+	cost := float64(c.WebSearches) * webSearchUSD
+	if p, ok := pricing[c.Model]; ok {
+		cost += float64(c.InputTokens)*p[0]/1e6 + float64(c.OutputTokens)*p[1]/1e6
 	}
-	return float64(c.InputTokens)*p[0]/1e6 + float64(c.OutputTokens)*p[1]/1e6
+	return cost
 }

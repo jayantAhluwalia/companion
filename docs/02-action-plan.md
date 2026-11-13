@@ -240,30 +240,37 @@ Implementation notes for Go + Anthropic SDK:
 - Put the static system prompt first and the per-run data last so prompt caching applies.
 - Log every call to `llm_calls` with `usage` tokens.
 
-### 5.5 Evaluator (one run)
+### 5.5 Evaluator (one run) — as built 13 Nov 2026
+
+The original sketch scored thoughts on age and type only. The built engine adds **hooks**
+(Section 6.8): each thought carries the outside-world conditions that make it timely, and
+the engine checks them against real data before scoring. Code: `services/api/internal/engine`.
 
 ```
-run(trigger):
+run(trigger):                                  -- ticker every 30 min, /nudge, or the admin endpoint
   acquire pg advisory lock (skip if held)
-  prefs, now_local = load
-  if in_quiet_hours(now_local):              record(outcome=blocked, reason=quiet_hours); return
-  if nudges_sent_today >= prefs.daily_limit: record(blocked, daily_limit); return
-  if minutes_since_last_sent < prefs.min_interval_minutes: record(blocked, min_interval); return
-  candidates = SELECT thoughts WHERE status='active'
-                 AND (snoozed_until IS NULL OR snoozed_until < now)
-                 AND (last_nudged_at IS NULL OR last_nudged_at < now - cooldown(thought))
-  if empty:                                   record(none, no_candidates); return
-  scored = score(each candidate)              -- Section 6.4, components stored in run.scores
-  shortlist = top 5 by score
-  decision = llm.decide(shortlist, context)   -- Section 5.4
-  if decision.action == none:                 record(none, decision.reason); return
-  validate(decision) else                     record(blocked, invalid_llm_output); return
-  nudge = insert nudges(status=scheduled)
-  send via Expo push; on success status=sent, thought.last_nudged_at=now, nudge_count+1
-  record(nudged, decision.reason)
+  expire nudges unanswered for 24 h            -- each is an "ignore": cooldown doubles, 4 in a row fades
+  wake snoozed thoughts whose time is up
+  GATES (skipped when the user asked with /nudge):
+    paused | sleep window ± 30 min | at work and asked not to be nudged
+    | at work, lunch-only, and not 13:00–14:00 | daily cap | minimum interval
+    -> record(blocked, reason); return
+  candidates = active, interpreted, not unclear
+  for each: held if on cooldown (3 days × 2^ignored_streak, cap 30)
+            check its hooks -> states (fired | mixed | waiting | negative | unknown)
+            held if touched < 48 h ago and no hook fired
+            score = 0.35T + 0.20R + 0.15I + 0.15A + 0.10O + 0.05F     (Section 6.4)
+  shortlist = top 3 with score ≥ 0.50          -- none: record(none); return, no model call
+  spend guards: monthly budget; 3 h back-off after the model last said "none"
+  decision = llm.decide(shortlist with signal facts, routine, now)    -- decide_v1
+  validate: thought must be on the shortlist, message non-empty and ≤ 500 chars
+  nudge = insert nudges(status=scheduled); send through the Sender interface
+  on success: status=sent, thought.last_nudged_at=now, nudge_count+1
+  record(nudged, decision.reason)              -- every run is logged with all components
 ```
 
-`cooldown(thought) = 3 days × 2^ignored_streak`, capped at 30 days.
+`/why` in the bot reads the latest run back: outcome, reason, and each thought's score
+components and hook states. `POST /v1/admin/evaluate?dry=1` decides without sending.
 
 ### 5.6 Notification pipeline (mobile)
 
@@ -298,19 +305,27 @@ Any status can return to `active` via the detail view.
 | revival | ≥21 days untouched, never nudged or last nudge >14 days ago | 1/week total |
 | relevance_check | ignored_streak ≥ 3 | once per thought |
 
-### 6.4 Scoring inputs (all in [0,1])
+### 6.4 Scoring inputs (all in [0,1]) — revised 13 Nov 2026
+- **T** timeliness, from hooks (6.8): 1.0 if any hook fired (0.8 for free time), 0.4 mixed,
+  0.1 waiting, 0.0 negative, and 0.5 when the thought has no hooks or none could be checked.
+  A thought whose moment has not come scores *below* a thought with no hook. That is what
+  makes the engine wait for the dry weekend instead of nagging on Monday.
 - **R** recency: `0` if touched < 2 days ago, else `min(days_since_touch / 14, 1)`.
-- **I** importance: start 0.5; +0.25 if user edited or added context; +0.25 if opened
-  detail ≥2 times; −0.25 per dismissal (min 0).
-- **A** actionability: 1.0 if a next step ≤30 min exists; 0.5 if any steps; 0 if `unclear`.
-- **O** opportunity: base by type: experiences 1.0 on days off and Thu–Sat else 0.3;
-  development 0.6; actionable 0.5; ideas 0.4. Then routine from preferences: inside working
-  hours multiply by 0.3 if `nudge_during_work = no`, by 1.0 in the lunch hour if `lunch`,
-  by 0.6 if `yes`. Sleep window is a hard gate, never a score. (Weather and calendar later.)
-- **F** feedback: style score (6.5) of the best style; 0.5 until there are ≥3 data points.
+- **I** importance: 0.5; +0.15 if the reading was confirmed; +0.20 if the user corrected or
+  clarified it; −0.20 per "later" (clamped to 0–1).
+- **A** actionability: 1.0 if a next step ≤ 30 min exists; 0.5 if any steps; 0.2 if none.
+- **O** opportunity: experiences 1.0 on a day off or within two days of one, else 0.3;
+  development 0.6; actionable 0.5; ideas 0.4.
+- **F** feedback: constant 0.5 until Phase 3 supplies style scores (6.5).
 
-Weights stay `0.30R + 0.20I + 0.20A + 0.15O + 0.15F` until two weeks of debug-screen
-reading suggests otherwise. Store all components per candidate in `decision_runs.scores`.
+Weights: `0.35T + 0.20R + 0.15I + 0.15A + 0.10O + 0.05F`, bar 0.50. Timeliness leads because
+the product's promise is the right moment. What the weights must guarantee is pinned by
+`TestScoreShape`: a fired hook wins on a fresh thought; a waiting hook holds a week-old
+thought back but not a two-week-old one; bad weather holds a ride back.
+
+Routine is a **gate**, not a score (changed from the 11 Nov plan): "no nudges during work"
+at 15% weight moved a score by about 0.05 and would not have stopped a nudge. With a daily
+cap of one, a nudge at a bad time also uses up the day's only slot.
 
 ### 6.5 Preference learning
 ```
@@ -324,6 +339,26 @@ style. Ignored counts as nothing. Later split counters by thought type.
 After a `relevance_check` nudge is ignored for 7 days, set status `faded` and stop nudging.
 Faded thoughts stay visible in the overview under "Quietly set aside" and can be reactivated.
 Never delete.
+
+### 6.8 Hooks and signals (added 13 Nov 2026)
+
+The interpreter (`interpret_v2`) returns zero to three hooks per thought. A hook says what
+would make acting on the thought timely; the engine checks it; the model words the nudge
+from the facts the engine fetched and may not state any other.
+
+| Hook | Example thought | What the engine checks | Fires when | Cost |
+|---|---|---|---|---|
+| `weather` | motorcycle ride to Bir | Open-Meteo forecast at the destination (coordinates from the interpreter) or at home, for the next days off | every needed day is dry and calm, 1–2 days ahead for a day out, 1–3 for two days, 2–5 for longer | free |
+| `web` | buy winter clothes | one web lookup by Claude with server-side search, sources verified against the search results | a sale / release / event is live or starts within a week, confidence ≥ 0.6 | ~$0.10–0.17 |
+| `date` | renew insurance by 5 Dec | the calendar | within `lead_days` of the date | free |
+| `free_time` | finish the course | routine | a day off before 19:00, or after work for ≤ 2 h tasks | free |
+
+Web lookups are the only expensive signal, so they are rationed: one per run, two per day
+(`SCOUTS_PER_DAY`), none past 80% of `MONTHLY_BUDGET_USD`, and each finding is cached in
+`signals` until the date the lookup itself suggested rechecking (2–14 days).
+
+Not built yet: public holidays and long weekends, calendar free/busy, price tracking for a
+specific product, and the "receptive moment" trigger (evaluate when the user messages).
 
 ### 6.7 Resolved open questions (from Section 22)
 | Question | Default |
@@ -359,41 +394,29 @@ produced by a structured-output Claude call.
 
 Exit: step 6 and 7 work end to end. Write down anything that surprised you in `docs/`.
 
-### Phase 1 — Capture and memory (4–6 days)
+### Phase 1 — Capture and memory — DONE 13 Nov 2026
 Goal: dump thoughts for a week and trust the system to remember and understand them.
 
-1. Migrations for `users`, `user_preferences`, `device_tokens`, `thoughts`,
-   `thought_interpretations`, `thought_events`, `llm_calls`. Seed one user.
-2. sqlc queries; thought CRUD handlers; event append.
-3. Interpretation job: goroutine after insert, prompt `interpret_v1`, schema validation,
-   store v1, log the call. Retry once on transient error; mark `unclear` on persistent error.
-4. User corrections create interpretation `source=user` and bump `current_interpretation_id`.
-5. Mobile: Home (capture box + recent 10), Thought detail (raw, interpretation, next steps,
-   status actions, edit type/title), simple overview list grouped by status.
-6. `prompts/fixtures/thoughts.jsonl` with 30 varied thoughts and expected types; a Go test
-   behind a build tag that runs them and reports accuracy. Run it before every prompt change.
-7. Routine onboarding (added 11 Nov 2026): `/start` asks four button questions, all skippable
-   with defaults: sleep window (quiet hours), weekday working hours, whether nudges are okay
-   during work (yes / lunch only / no), and days off. Stored in `user_preferences`; `/routine`
-   edits them later. Stated answers are priors; observed response times override them in Phase 3.
+Built (Telegram instead of the mobile screens): schema with embedded goose migrations;
+hand-written pgx store; async interpretation with logged cost; `/list`, `/done`, `/snooze`,
+`/drop`, `/cost`; the "Not quite" correction flow (pick a type, retitle, or explain and have it
+re-read; every correction is a new version, never an edit); `/start` onboarding with five
+skippable questions (sleep, work hours, nudges during work, days off, city) and `/routine`;
+a 30-thought fixture test (`make live`): 28/30 types and 30/30 hook kinds on 13 Nov 2026.
 
-Exit: 20+ real thoughts captured over a week; ≥80% interpretations acceptable without edit;
-capture-to-saved under 2 seconds on the phone.
+Still open from this phase: a weekly database backup, and the exit test of 20+ real thoughts.
 
-### Phase 2 — Decision engine and nudges (5–7 days)
+### Phase 2 — Decision engine and nudges — BUILT 13 Nov 2026, on trial
 Goal: the agent brings relevant thoughts back, and you can explain every decision it made.
 
-1. Migrations for `decision_runs`, `nudges`.
-2. Candidate selection query; scoring with stored components; policy checks.
-3. `decide_v1` prompt with structured output; validation; `none` handling.
-4. Expo push sender; nudge status transitions; `last_nudged_at` / `nudge_count` updates.
-5. Ticker goroutine (2 h, local 08:00–21:00) with advisory lock; manual trigger endpoint.
-6. Mobile: nudge feed; notification categories and response handling; deep link into
-   thought detail; preferences screen (quiet hours, daily limit, enable/disable).
-7. Debug screen listing decision runs with outcome, reason and candidate scores.
+Built: gates, cooldowns, hooks and signals (6.8), scoring with stored components (6.4),
+`decide_v1`, delivery behind a `Sender` interface with the four action ids, the 30-minute
+ticker with an advisory lock, `/nudge`, `/why`, `/pause`, `/resume`, the admin endpoints,
+spend guards. Sections 5.5, 6.4 and 6.8 describe it as built.
 
 Exit: one week of live nudges; zero policy violations in `decision_runs`; every sent nudge
-has a reason you agree with or a logged note on why not.
+has a reason you agree with or a logged note on why not. Tune weights and lead windows only
+after that week, from `/why` readings.
 
 ### Phase 3 — Feedback and learning (4–5 days)
 Goal: the agent starts adapting and backing off.

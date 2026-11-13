@@ -49,3 +49,37 @@ direct connection is IPv6-only). Fly's Mumbai region is deprecated for new machi
 API runs in `sin`, about 60 ms from the database. Queries are hand-written against pgx
 instead of generated with sqlc: fifteen queries did not justify a code-generation step.
 Migrations are embedded goose SQL files applied at startup, so every deploy migrates.
+
+## 2026-11-13 — Nudge on the right moment: hooks, signals, and timeliness first
+
+**Context.** The engine as planned ranked thoughts by age and type. The user's bar is higher:
+bring up the ride on Thursday because the weekend is dry; bring up the clothes because a sale
+starts. That needs facts from outside the app.
+
+**Decision.** The interpreter attaches up to three hooks to a thought (`weather`, `web`,
+`date`, `free_time`). The engine checks them: Open-Meteo for weather (free, coordinates only),
+Claude with server-side web search for sales, releases and events. Timeliness becomes the
+heaviest score component, and a hook that has not fired scores below having no hook, so the
+engine waits. The model writes the nudge only from facts the backend fetched, and web sources
+are kept only if they appear in the actual search results.
+
+**Consequences.** A web lookup costs about $0.10–0.17, so they are rationed (two a day, cached
+until the suggested recheck date, stopped at 80% of a $15 monthly budget). Interpretation
+roughly tripled in cost to about $0.016 because the prompt and output grew. Expect $6–10 a
+month at 10–20 active thoughts.
+
+## 2026-11-13 — Routine is a gate, not a score
+
+**Decision.** "Don't nudge me at work" and "only at lunch" block the tick outright. Days off
+still only adjust which thought is preferred. Reason: as a score input it moved the total by
+about 0.05 and would not have prevented a nudge; and with one nudge a day, a badly timed one
+wastes the day. This supersedes the "work hours adjust the opportunity score" line of 11 Nov.
+
+## 2026-11-13 — A re-read never overwrites a reading the user accepted
+
+**Context.** The first hook backfill re-interpreted four thoughts and stored the whole new
+reading. One confirmed "experience" came back as an "idea". Caught the same hour, repaired by
+migration 00003.
+
+**Decision.** Backfills take only the new fields (hooks, timeframe) and keep type, title and
+steps. The same applies to any future prompt upgrade.

@@ -9,10 +9,13 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // the alpine image has no zoneinfo; local time needs it
 
 	"companion/api/internal/ai"
 	"companion/api/internal/config"
+	"companion/api/internal/engine"
 	apihttp "companion/api/internal/http"
+	"companion/api/internal/signals"
 	"companion/api/internal/store"
 	"companion/api/internal/telegram"
 )
@@ -43,11 +46,18 @@ func main() {
 	log.Info("database ready")
 
 	aiClient := ai.New(cfg.AnthropicKey, cfg.Model)
-	bot := telegram.NewBot(telegram.NewClient(cfg.TelegramToken), aiClient, db, cfg.TelegramChatID, log)
+	weather := signals.NewWeather()
+	eng := engine.New(db, aiClient, weather, engine.Config{MonthlyBudgetUSD: cfg.MonthlyBudget, ScoutsPerDay: cfg.ScoutsPerDay}, log)
+	bot := telegram.NewBot(telegram.NewClient(cfg.TelegramToken), aiClient, db, eng, weather, cfg.TelegramChatID, log)
+	eng.SetSender(bot)
+	go eng.Backfill(ctx)
 	if cfg.BotEnabled {
 		go bot.Run(ctx)
+		go eng.Run(ctx)
 	} else {
-		log.Warn("telegram bot disabled (BOT_ENABLED=false)")
+		// A local run must not poll Telegram or nudge on a timer: the
+		// deployed process owns both. The admin endpoints still work.
+		log.Warn("telegram polling and the nudge ticker are disabled (BOT_ENABLED=false)")
 	}
 
 	srv := apihttp.New(cfg.APIToken, aiClient, bot, log)

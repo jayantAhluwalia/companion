@@ -1,0 +1,30 @@
+{"thought": "I have to buy beard oil", "type": "actionable_intention"}
+{"thought": "need to renew my bike insurance before it lapses on 5 december", "type": "actionable_intention", "hooks": ["date"]}
+{"thought": "call the plumber about the kitchen tap", "type": "actionable_intention", "no_hooks": true}
+{"thought": "sell my old helmet on olx", "type": "actionable_intention", "no_hooks": true}
+{"thought": "book the car for servicing", "type": "actionable_intention"}
+{"thought": "want to buy some new winter clothes, jackets mostly", "type": "actionable_intention", "hooks": ["web"]}
+{"thought": "get a new pair of running shoes when there's a good deal", "type": "actionable_intention", "hooks": ["web"]}
+{"thought": "return the amazon package", "type": "actionable_intention", "no_hooks": true}
+{"thought": "pay electricity bill", "type": "actionable_intention", "no_hooks": true}
+{"thought": "upgrade my phone when the new pixel comes out", "type": "actionable_intention", "hooks": ["web"]}
+{"thought": "I want to go for a motorcycle ride to Bir Billing", "type": "experience_interest", "hooks": ["weather"]}
+{"thought": "would love to do a sunrise trek at Nag Tibba sometime", "type": "experience_interest", "hooks": ["weather"]}
+{"thought": "watch the new Nolan film in imax when it releases", "type": "experience_interest", "hooks": ["web"]}
+{"thought": "try that new ramen place in gurgaon everyone talks about", "type": "experience_interest"}
+{"thought": "go cycling around the lake some morning", "type": "experience_interest", "hooks": ["weather"]}
+{"thought": "want to see a live cricket match at the stadium", "type": "experience_interest", "hooks": ["web"]}
+{"thought": "take mom and dad to Rishikesh for a weekend", "type": "experience_interest", "hooks": ["weather"]}
+{"thought": "should check out the book fair if it comes to town", "type": "experience_interest", "hooks": ["web"]}
+{"thought": "what if I built a small app that splits rent among flatmates", "type": "idea_possibility"}
+{"thought": "maybe start a newsletter about motorcycle touring", "type": "idea_possibility"}
+{"thought": "could turn the spare room into a home office", "type": "idea_possibility"}
+{"thought": "idea: a telegram bot that reminds me of things at the right time", "type": "idea_possibility"}
+{"thought": "thinking of maybe investing in index funds, not sure", "type": "idea_possibility"}
+{"thought": "I should learn to cook properly", "type": "personal_development"}
+{"thought": "want to get better at public speaking", "type": "personal_development"}
+{"thought": "start running three times a week", "type": "personal_development"}
+{"thought": "learn rust this winter", "type": "personal_development", "hooks": ["free_time"]}
+{"thought": "read more books, at least one a month", "type": "personal_development"}
+{"thought": "finish the system design course I bought", "type": "personal_development", "hooks": ["free_time"]}
+{"thought": "that thing with the blue", "type": "unclear", "no_hooks": true}
