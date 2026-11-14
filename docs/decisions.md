@@ -95,3 +95,20 @@ interpreter (`interpret_v3`), which now also returns `not_a_thought` for talk ai
 those are archived with a "Keep it as a thought" button. The list is kept small on purpose and
 the prompt says "when in doubt it is a thought", because dropping a real thought is the worse
 error. The fixture test fails on any thought-or-chatter mistake.
+
+## 2026-11-14 — First two live nudges reviewed
+
+Both were acted on ("Let's do it", then done): the wardrobe light on Fri 19:00 and the beard
+oil on Sat 09:00. Reading the decision log behind them showed two defects, fixed the same day:
+
+- **Free time no longer overrides the two-day rest.** "The workday is over" fires every
+  evening, so it surfaced a one-day-old idea at the minute work ended. Only weather, web and
+  date hooks may interrupt a rest now.
+- **Details from a lookup that found nothing timely are no longer given to the nudge
+  writer.** The first nudge quoted a ₹375 listing from a lookup the engine itself had rated
+  "waiting, confidence 0.5". The writer now gets facts only for fired or mixed signals, and
+  `decide_v2` also tells it to stay with what the person said (building, not buying).
+
+Open after the review, for the user to decide: whether a date-critical nudge may exceed the
+daily cap of one; whether "ran out of" style thoughts should skip the two-day rest; a buffer
+after work ends.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"companion/api/internal/ai"
 	"companion/api/internal/store"
 )
 
@@ -94,14 +95,17 @@ const freshFor = 48 * time.Hour
 
 // tooFresh holds back a thought the user captured or acted on in the last
 // two days. A fired hook overrides it: if the ride was mentioned yesterday
-// and the weekend is dry, that is exactly when to speak.
+// and the weekend is dry, that is exactly when to speak. Free time does not
+// count: it comes round every evening, so it is not a moment worth
+// interrupting a rest for (found in the 13 Nov review, when "the workday is
+// over" surfaced a one-day-old idea).
 func tooFresh(t store.Thought, hooks []HookState, now time.Time) string {
 	until := t.LastTouchedAt.Add(freshFor)
 	if !now.Before(until) {
 		return ""
 	}
 	for _, h := range hooks {
-		if h.State == StateFired {
+		if h.State == StateFired && h.Kind != ai.HookFreeTime {
 			return ""
 		}
 	}

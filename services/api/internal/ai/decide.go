@@ -10,10 +10,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/v2"
 )
 
-//go:embed prompts/decide_v1.md
+//go:embed prompts/decide_v2.md
 var decidePrompt string
 
-const DecidePromptVersion = "decide_v1"
+const DecidePromptVersion = "decide_v2"
 
 // Nudge types, shared with the nudges table.
 var NudgeTypes = []string{"opportunity", "action_prompt", "check_in", "revival", "relevance_check", "follow_up"}

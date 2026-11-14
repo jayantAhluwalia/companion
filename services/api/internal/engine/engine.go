@@ -257,7 +257,14 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 			c.NextSteps = []ai.NextStep{}
 		}
 		for _, h := range sc.Hooks {
-			c.Signals = append(c.Signals, ai.DecideSignal{Kind: h.Kind, State: h.State, Summary: h.Summary, Facts: h.Facts})
+			sig := ai.DecideSignal{Kind: h.Kind, State: h.State, Summary: h.Summary}
+			// Details are handed over only for signals that hold. A lookup
+			// that found nothing timely still has specifics in it (a price
+			// on some listing), and a writer given them will use them.
+			if h.State == StateFired || h.State == StateMixed {
+				sig.Facts = h.Facts
+			}
+			c.Signals = append(c.Signals, sig)
 		}
 		in.Candidates = append(in.Candidates, c)
 	}

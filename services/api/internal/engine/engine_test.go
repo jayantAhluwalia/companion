@@ -197,6 +197,9 @@ func TestTooFresh(t *testing.T) {
 	if tooFresh(fresh, []HookState{{State: StateFired}}, now) != "" {
 		t.Error("a fired hook should override the rest")
 	}
+	if tooFresh(fresh, []HookState{{Kind: ai.HookFreeTime, State: StateFired}}, now) == "" {
+		t.Error("free time comes round daily and must not override the rest")
+	}
 	if tooFresh(old, nil, now) != "" {
 		t.Error("a three-day-old thought is no longer fresh")
 	}
