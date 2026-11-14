@@ -451,35 +451,50 @@ Exit: one week of live nudges; zero policy violations in `decision_runs`; every 
 has a reason you agree with or a logged note on why not. Tune weights and lead windows only
 after that week, from `/why` readings.
 
-### Phase 3 — Feedback and learning (4–5 days)
+### Phase 3 — Feedback and learning — PARTLY BUILT, re-scoped 14 Nov 2026
 Goal: the agent starts adapting and backing off.
 
-1. Feedback endpoint and UI (helpful / not helpful, reason chips: tone, timing, relevance).
-2. Snooze (1 day / 3 days / 1 week / pick date), dismiss, not relevant, done, progress note.
-3. `ignored_streak` and exponential cooldown; `relevance_check` type; `faded` status (6.6).
-4. Style scores with exploration (6.5); F component wired into scoring and into the decide
-   prompt as a hint.
-5. `revival` and `opportunity` types with weekly caps.
-6. SQL views for the Section 19 metrics; a `make metrics` target that prints them.
+Status after the strategy revision and the literature review (section 6.9):
 
-Exit: two to three weeks of use. Review metrics weekly. Adjust weights only with evidence
-from the debug screen.
+| # | Item as planned | Status | Note |
+|---|---|---|---|
+| 1 | Feedback UI: helpful / not helpful, reason chips | Not built, demoted | The research found people's ratings of timing do not track what they do. Behaviour (button pressed, done or not) is the primary signal. Keep at most one optional "bad timing" tap. |
+| 2 | Snooze choices, dismiss, not relevant, done, progress note | Built, except the progress note | "Later" asks when; the review offers a month; `/done`, `/drop`. |
+| 3 | Ignored streak, growing cooldown, relevance check, fading | Built | Two unanswered nudges also move a thought to the review and shrink the weekly budget. |
+| 4 | Style scores with exploration; F wired into the score | Replaced | No evidence supports a style bandit on a few nudges a week. Built instead: a per-window acted/ignored record with Thompson sampling, and wording that varies from the last three nudges. F stays constant. |
+| 5 | `revival` and `opportunity` types with weekly caps | Replaced | Opportunity is a lane inside the shared budget; revival is the weekly review. |
+| 6 | Metrics views and `make metrics` | Not built | `/why` shows the per-window record and the review shows the week. A quarterly metrics printout is still to do. |
 
-### Phase 4 — Per-thought conversation (4–5 days)
+Still to do in this phase: `make metrics` (acted rate per lane and per window, nudges in the
+trailing seven days, completion within a day and a week); the progress note; an optional
+"bad timing" tap. Exit unchanged: two to three weeks of use, reviewed with evidence.
+
+### Phase 4 — Per-thought conversation — NOT STARTED
 Goal: "Let's do it" leads somewhere useful.
 
-1. `thought_messages` table; chat endpoint that sends the thought's interpretation, events
-   and last 20 messages as context; streaming optional.
-2. Agent can propose an updated next-step list; user taps "apply" to create a new
+1. `thought_messages` table; chat that sends the thought's interpretation, events and last 20
+   messages as context.
+2. Agent can propose an updated next-step list; the user taps "apply" to create a new
    interpretation `source=user`.
-3. Mobile: thread screen reachable from detail and from nudge actions `next_steps` / `do_it`.
+3. Added from the research, and the highest-value item here: **"Let's do it" lands on a prepared
+   action** (an order link, a drafted message, a pre-filled slot). Removing steps has the largest
+   and best-replicated effect on follow-through of anything reviewed.
 
 Exit: for three real thoughts, a conversation moved the thought to a concrete next step.
 
-### Phase 5 — Nice-to-haves (pick by felt need, not by list)
-Share-sheet capture; home-screen widget; weather as an O input (Open-Meteo, free);
-pgvector related-thought search; raising the daily cap to 2; background notification
-actions; app icon and polish; TestFlight for a second user.
+### Phase 5 — The iOS app and extras — NOT STARTED
+The end goal agreed on 10 Nov 2026: an iOS app with interactive notifications, replacing
+Telegram as the channel. The engine already delivers through a `Sender` interface with the
+same four action ids, so this is a new channel plus screens, not an engine change. It needs
+the Apple Developer membership and the parked Expo app in `apps/mobile`.
+
+Extras, by felt need: share-sheet capture; home-screen widget; related-thought search; public
+holidays and long weekends as a signal; invite-only multi-user for friends (after tuning).
+Already done ahead of plan: weather as a signal. Superseded: "raising the daily cap to 2",
+by the weekly budget.
+
+Housekeeping still open from earlier phases: a weekly database backup; a user-facing setting
+for the weekly budget.
 
 **Total: roughly 20–26 focused days.** Full-time that is 4–5 weeks, matching the discovery
 estimate. Weekends only, plan on three months.
