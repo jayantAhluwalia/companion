@@ -18,6 +18,9 @@ import (
 type Client struct {
 	token string
 	http  *http.Client
+	// Dry makes every outgoing call a logged no-op. Development runs use it
+	// so a local experiment can never message a real person.
+	Dry func(method string, payload any)
 }
 
 func NewClient(token string) *Client {
@@ -79,6 +82,10 @@ type BotCommand struct {
 // --- methods ---
 
 func (c *Client) call(ctx context.Context, method string, payload any, out any) error {
+	if c.Dry != nil && method != "getMe" && method != "getUpdates" {
+		c.Dry(method, payload)
+		return nil
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err

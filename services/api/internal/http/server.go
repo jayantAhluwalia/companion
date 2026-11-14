@@ -17,20 +17,43 @@ import (
 	"companion/api/internal/telegram"
 )
 
+// Health reports whether the parts that matter are alive. Each returns ""
+// when well or a short description of what is wrong.
+type Health func(ctx context.Context) map[string]string
+
 type Server struct {
-	token string
-	ai    *ai.Client
-	bot   *telegram.Bot
-	log   *slog.Logger
+	token   string
+	ai      *ai.Client
+	bot     *telegram.Bot
+	log     *slog.Logger
+	health_ Health // trailing underscore: "health" is the handler
 }
 
-func New(token string, aiClient *ai.Client, bot *telegram.Bot, log *slog.Logger) *Server {
-	return &Server{token: token, ai: aiClient, bot: bot, log: log}
+func New(token string, aiClient *ai.Client, bot *telegram.Bot, health Health, log *slog.Logger) *Server {
+	return &Server{token: token, ai: aiClient, bot: bot, health_: health, log: log}
+}
+
+// health answers 200 only when the database, the Telegram poll and the
+// engine's ticker are all alive. A process that is up but deaf or stuck
+// reports 503, so the platform's check and any outside monitor can see it.
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	problems := map[string]string{}
+	if s.health_ != nil {
+		problems = s.health_(ctx)
+	}
+	if len(problems) == 0 {
+		writeJSON(w, 200, map[string]string{"ok": "true"})
+		return
+	}
+	problems["ok"] = "false"
+	writeJSON(w, http.StatusServiceUnavailable, problems)
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"ok": "true"}) })
+	mux.HandleFunc("GET /healthz", s.health)
 	mux.Handle("POST /v1/ai/interpret", s.auth(http.HandlerFunc(s.interpret)))
 	mux.Handle("POST /v1/admin/nudge", s.auth(http.HandlerFunc(s.evaluate)))
 	mux.Handle("POST /v1/admin/evaluate", s.auth(http.HandlerFunc(s.evaluate)))
@@ -61,6 +84,7 @@ func (s *Server) interpret(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		RawContent string `json:"raw_content"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.RawContent) == "" {
 		writeJSON(w, 400, map[string]string{"error": "raw_content required"})
 		return

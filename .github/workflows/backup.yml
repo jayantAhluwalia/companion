@@ -1,0 +1,72 @@
+name: backup
+
+# Nightly export of every table, proven restorable, encrypted, kept 30 days.
+# Needs two repository secrets (Settings -> Secrets and variables -> Actions):
+#   DATABASE_URL        the same value as in services/api/.env
+#   BACKUP_PASSPHRASE   any long passphrase; keep a copy in your password manager,
+#                       because a backup cannot be opened without it
+#
+# To open a backup:  gpg --decrypt companion-YYYYMMDD.jsonl.gz.gpg > backup.jsonl.gz
+# To load it:        DB_SCHEMA=restored go run ./cmd/backup restore backup.jsonl.gz
+
+on:
+  schedule:
+    - cron: "30 21 * * *" # 03:00 India time
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: verify
+          POSTGRES_DB: verify
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/api/go.mod
+          cache-dependency-path: services/api/go.sum
+      - name: Check secrets
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          test -n "$DATABASE_URL" || { echo "::error::Add the DATABASE_URL repository secret"; exit 1; }
+          test -n "$BACKUP_PASSPHRASE" || { echo "::error::Add the BACKUP_PASSPHRASE repository secret"; exit 1; }
+      - name: Export (read-only)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: go run ./cmd/backup export "$RUNNER_TEMP/companion-$(date -u +%Y%m%d).jsonl.gz"
+      - name: Prove it restores (into a throwaway database on this runner)
+        env:
+          DATABASE_URL: postgres://postgres:verify@localhost:5432/verify?sslmode=disable
+        run: go run ./cmd/backup verify "$RUNNER_TEMP"/companion-*.jsonl.gz
+      - name: Encrypt
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          gpg --batch --yes --symmetric --cipher-algo AES256 --passphrase-fd 3 \
+              "$RUNNER_TEMP"/companion-*.jsonl.gz 3<<<"$BACKUP_PASSPHRASE"
+          rm "$RUNNER_TEMP"/companion-*.jsonl.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: companion-backup-${{ github.run_id }}
+          path: ${{ runner.temp }}/companion-*.jsonl.gz.gpg
+          retention-days: 30
+          if-no-files-found: error

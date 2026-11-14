@@ -18,6 +18,8 @@ type Config struct {
 	BotEnabled     bool    // false for local runs so two pollers never fight over one bot token
 	MonthlyBudget  float64 // USD of model spend after which the engine stops calling the model
 	ScoutsPerDay   int     // web lookups per day, the one expensive signal
+	DBSchema       string  // Postgres schema to use; empty = public. Development uses its own.
+	DrySend        bool    // log outgoing Telegram messages instead of sending them
 }
 
 func Load() (Config, error) {
@@ -31,6 +33,8 @@ func Load() (Config, error) {
 		BotEnabled:    getenv("BOT_ENABLED", "true") != "false",
 		MonthlyBudget: 15,
 		ScoutsPerDay:  2,
+		DBSchema:      os.Getenv("DB_SCHEMA"),
+		DrySend:       os.Getenv("DRY_SEND") == "true",
 	}
 	if v := os.Getenv("MONTHLY_BUDGET_USD"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)

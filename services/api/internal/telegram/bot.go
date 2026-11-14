@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -32,11 +33,13 @@ type Bot struct {
 
 	mu       sync.Mutex
 	followOn map[int64]*time.Timer // per user: a pending "while you're here" check
+	alerted  map[string]time.Time  // last time each kind of alert went to the owner
+	lastPoll atomic.Int64          // unix time of the last successful poll, for the health check
 }
 
 func NewBot(client *Client, aiClient *ai.Client, db *store.Store, eng *engine.Engine, weather *signals.Weather, allowedChat int64, log *slog.Logger) *Bot {
 	return &Bot{client: client, ai: aiClient, db: db, eng: eng, weather: weather, log: log, allowedChat: allowedChat,
-		followOn: map[int64]*time.Timer{}}
+		followOn: map[int64]*time.Timer{}, alerted: map[string]time.Time{}}
 }
 
 // AllowedChat is the chat the bot will proactively message (nudges).
@@ -65,7 +68,15 @@ func (b *Bot) Run(ctx context.Context) {
 		{Command: "start", Description: "What this bot does"},
 	})
 
+	go b.sweep(ctx)
+
+	// The offset is kept in the database so a restart resumes where the
+	// last process stopped instead of receiving handled updates again.
 	var offset int64
+	if v, err := b.db.GetKV(ctx, offsetKey); err == nil && v != "" {
+		offset, _ = strconv.ParseInt(v, 10, 64)
+	}
+	failingSince := time.Time{}
 	for {
 		if ctx.Err() != nil {
 			return
@@ -75,13 +86,77 @@ func (b *Bot) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			b.log.Error("getUpdates", "err", err)
+			if failingSince.IsZero() {
+				failingSince = time.Now()
+			}
+			b.log.Error("getUpdates", "err", err, "failing_for", time.Since(failingSince).Round(time.Second).String())
 			time.Sleep(3 * time.Second)
 			continue
 		}
+		failingSince = time.Time{}
+		b.lastPoll.Store(time.Now().Unix())
 		for _, u := range updates {
 			offset = u.UpdateID + 1
 			b.handle(ctx, u)
+		}
+		if len(updates) > 0 {
+			if err := b.db.SetKV(ctx, offsetKey, strconv.FormatInt(offset, 10)); err != nil {
+				b.log.Warn("save offset", "err", err)
+			}
+		}
+	}
+}
+
+const offsetKey = "telegram_offset"
+
+// LastPoll is when Telegram last answered a poll; zero before the first one.
+func (b *Bot) LastPoll() time.Time {
+	if v := b.lastPoll.Load(); v != 0 {
+		return time.Unix(v, 0)
+	}
+	return time.Time{}
+}
+
+// Alert tells the owner that something needs attention, at most once an
+// hour per kind so a persistent fault does not become a flood. Errors must
+// already be free of secrets: this text is shown in the chat.
+func (b *Bot) Alert(kind, text string) {
+	if b.allowedChat == 0 {
+		return
+	}
+	b.mu.Lock()
+	if last, ok := b.alerted[kind]; ok && time.Since(last) < time.Hour {
+		b.mu.Unlock()
+		return
+	}
+	b.alerted[kind] = time.Now()
+	b.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	b.reply(ctx, b.allowedChat, "⚠️  <b>Something needs a look</b>\n"+Esc(clip(text, 600)))
+}
+
+// sweep retries captures that never got an interpretation: the first
+// attempt failed, timed out, or was cut off by a restart. It runs at start
+// (to pick up what a deploy interrupted) and every few minutes after.
+func (b *Bot) sweep(ctx context.Context) {
+	for {
+		stuck, err := b.db.Uninterpreted(ctx, 2*time.Minute)
+		if err != nil {
+			b.log.Warn("sweep", "err", err)
+		}
+		for _, t := range stuck {
+			user, err := b.db.GetUser(ctx, t.UserID)
+			if err != nil {
+				continue
+			}
+			b.log.Info("retrying interpretation", "thought", t.ID)
+			b.interpret(user, t.ID, t.RawContent, "")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Minute):
 		}
 	}
 }
@@ -101,6 +176,11 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 	chat := m.Chat.ID
 	text := strings.TrimSpace(m.Text)
 	if text == "" {
+		// A photo, voice note, sticker or location. Say so, or the person
+		// will think it was saved.
+		if b.allowed(chat) {
+			b.reply(ctx, chat, "🙈  I can only read text for now, so that one wasn't saved. Type it and I'll keep it.")
+		}
 		return
 	}
 	if !b.allowed(chat) {
@@ -125,7 +205,7 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 		b.log.Warn("pending", "err", err)
 	}
 	if pending != nil && !strings.HasPrefix(text, "/") {
-		b.handlePending(ctx, user, *pending, text)
+		b.handlePending(ctx, user, *pending, text, m.MessageID)
 		return
 	}
 
@@ -173,7 +253,7 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 		// "ok", "thanks", a lone emoji: answer, but remember nothing.
 		b.reply(ctx, chat, "🙂  <i>Not saved. Send me a thought whenever one comes up.</i>")
 	default:
-		b.captureThought(ctx, user, text)
+		b.captureThought(ctx, user, text, m.MessageID)
 	}
 }
 
@@ -188,11 +268,15 @@ func userNow(u store.User) time.Time {
 
 // captureThought follows product principle 1: save and acknowledge instantly,
 // then let the interpretation arrive when it is ready.
-func (b *Bot) captureThought(ctx context.Context, user store.User, raw string) {
-	t, err := b.db.CreateThought(ctx, user.ID, raw, "telegram")
+func (b *Bot) captureThought(ctx context.Context, user store.User, raw string, messageID int64) {
+	t, created, err := b.db.CreateThought(ctx, user.ID, raw, "telegram", messageID)
 	if err != nil {
 		b.log.Error("create thought", "err", err)
 		b.reply(ctx, user.TelegramChatID, "I couldn't save that. Try again in a moment.")
+		return
+	}
+	if !created {
+		b.log.Info("duplicate delivery ignored", "message", messageID)
 		return
 	}
 	b.reply(ctx, user.TelegramChatID, "✍️  Got it.")
@@ -230,13 +314,21 @@ func (b *Bot) scheduleFollowOn(user store.User) {
 // interpret reads a thought (optionally with the user's clarification),
 // stores the result as a new version and shows it.
 func (b *Bot) interpret(user store.User, thoughtID int64, raw, clarification string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
+	// Bookkeeping uses its own context. If it shared the model call's
+	// deadline, a timeout would also silence the log entry and the message
+	// that tells the person what happened.
+	ctx, cancelAll := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancelAll()
+	if err := b.db.CountInterpretAttempt(ctx, thoughtID); err != nil {
+		b.log.Warn("count attempt", "err", err)
+	}
 	home := ""
 	if p, err := b.db.GetPrefs(ctx, user.ID); err == nil {
 		home = p.HomeCity
 	}
-	interp, info, err := b.ai.Interpret(ctx, raw, ai.InterpretContext{Today: userNow(user), Home: home, Clarification: clarification})
+	callCtx, cancelCall := context.WithTimeout(ctx, 90*time.Second)
+	interp, info, err := b.ai.Interpret(callCtx, raw, ai.InterpretContext{Today: userNow(user), Home: home, Clarification: clarification})
+	cancelCall()
 	_ = b.db.LogLLMCall(ctx, store.LLMCall{
 		UserID: &user.ID, ThoughtID: &thoughtID, Purpose: "interpret", Model: info.Model, PromptVer: info.PromptVersion,
 		InputTokens: info.InputTokens, OutputTokens: info.OutputTokens, CostUSD: info.CostUSD(),
@@ -244,7 +336,19 @@ func (b *Bot) interpret(user store.User, thoughtID int64, raw, clarification str
 	})
 	if err != nil {
 		b.log.Error("interpret", "err", err, "thought", thoughtID)
-		b.reply(ctx, user.TelegramChatID, "Saved. I couldn't make sense of it just now, so I'll keep your original wording.")
+		// A failure is not final: the sweep tries again, up to
+		// store.MaxInterpretAttempts. Say what is true at each stage.
+		t, getErr := b.db.GetThought(ctx, user.ID, thoughtID)
+		switch {
+		case getErr != nil:
+		case t.Interpretation != nil:
+			b.reply(ctx, user.TelegramChatID, "I couldn't re-read that just now, so the earlier reading stays.")
+		case t.InterpretAttempts >= store.MaxInterpretAttempts:
+			b.reply(ctx, user.TelegramChatID, "Saved in your own words. I couldn't make sense of it after a few tries, so it shows in /list as you wrote it.")
+			b.Alert("interpret", fmt.Sprintf("Interpretation failed %d times for one thought. Last error: %v", t.InterpretAttempts, err))
+		case t.InterpretAttempts == 1:
+			b.reply(ctx, user.TelegramChatID, "Saved. I couldn't read it properly just now; I'll try again in a few minutes.")
+		}
 		return
 	}
 	stored, err := b.db.AddInterpretation(ctx, thoughtID, "ai", interp, info.Model, info.PromptVersion)
@@ -338,7 +442,7 @@ func (b *Bot) list(ctx context.Context, user store.User) {
 		b.reply(ctx, user.TelegramChatID, "📭  Nothing here yet. Send me a thought.")
 		return
 	}
-	b.reply(ctx, user.TelegramChatID, formatList(ts))
+	b.reply(ctx, user.TelegramChatID, formatList(ts, userNow(user).Location()))
 }
 
 func (b *Bot) statusCommand(ctx context.Context, user store.User, cmd, arg string) {
@@ -421,7 +525,11 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 		toast = "Couldn't find it."
 		if t, err := b.db.GetThought(ctx, user.ID, id); err == nil && t.Interpretation != nil {
 			if err := b.db.SetStatus(ctx, id, "active", nil); err == nil {
-				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(id, t.Interpretation.Interpretation), nil)
+				// The model read this as chatter, so its type is "unclear"
+				// and an unclear thought is never nudged or reviewed. Ask
+				// what it is, or keeping it would change nothing.
+				kb := correctionKeyboard(id)
+				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(id, t.Interpretation.Interpretation)+"\n\n<i>Kept. What kind of thing is it?</i>", &kb)
 				toast = "Kept."
 			}
 		}

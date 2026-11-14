@@ -16,6 +16,15 @@ var correctionTypes = map[string]ai.ThoughtType{
 	"a": ai.TypeActionable, "e": ai.TypeExperience, "i": ai.TypeIdea, "d": ai.TypeDevelopment,
 }
 
+func correctionKeyboard(thoughtID int64) InlineKeyboardMarkup {
+	d := func(action, arg string) string { return fmt.Sprintf("%s:%d%s", action, thoughtID, arg) }
+	return InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
+		{btn("✅ It's a to-do", d("ct", ":a")), btn("🧭 An experience", d("ct", ":e"))},
+		{btn("💡 Just an idea", d("ct", ":i")), btn("🌱 Self-growth", d("ct", ":d"))},
+		{btn("✏️ Fix the title", d("cn", "")), btn("💬 Let me explain", d("cx", ""))},
+	}}
+}
+
 // correction handles the "Not quite" flow. A correction is never an edit:
 // it is a new interpretation version authored by the user, so the AI's
 // original reading stays in the history.
@@ -24,11 +33,7 @@ func (b *Bot) correction(ctx context.Context, user store.User, action string, th
 	switch action {
 	case "wrong":
 		_ = b.db.AddEvent(ctx, thoughtID, nil, "interpretation_flagged", nil)
-		_ = b.client.EditKeyboard(ctx, chat, msgID, InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: "✅ It's a to-do", CallbackData: fmt.Sprintf("ct:%d:a", thoughtID)}, {Text: "🧭 An experience", CallbackData: fmt.Sprintf("ct:%d:e", thoughtID)}},
-			{{Text: "💡 Just an idea", CallbackData: fmt.Sprintf("ct:%d:i", thoughtID)}, {Text: "🌱 Self-growth", CallbackData: fmt.Sprintf("ct:%d:d", thoughtID)}},
-			{{Text: "✏️ Fix the title", CallbackData: fmt.Sprintf("cn:%d", thoughtID)}, {Text: "💬 Let me explain", CallbackData: fmt.Sprintf("cx:%d", thoughtID)}},
-		}})
+		_ = b.client.EditKeyboard(ctx, chat, msgID, correctionKeyboard(thoughtID))
 		return "What should I fix?"
 
 	case "ct":
@@ -64,7 +69,7 @@ func (b *Bot) correction(ctx context.Context, user store.User, action string, th
 }
 
 // handlePending routes a typed reply to whichever question is waiting for it.
-func (b *Bot) handlePending(ctx context.Context, user store.User, p store.Pending, text string) {
+func (b *Bot) handlePending(ctx context.Context, user store.User, p store.Pending, text string, messageID int64) {
 	chat := user.TelegramChatID
 	switch p.Kind {
 	case "retitle":
@@ -98,7 +103,7 @@ func (b *Bot) handlePending(ctx context.Context, user store.User, p store.Pendin
 	case "city":
 		// A full sentence is a thought, not a city: the user moved on.
 		if len(strings.Fields(text)) > 4 {
-			b.captureThought(ctx, user, text)
+			b.captureThought(ctx, user, text, messageID)
 			return
 		}
 		b.onboardingTyped(ctx, user, p, text)

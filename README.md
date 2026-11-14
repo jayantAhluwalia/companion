@@ -16,14 +16,18 @@ make run
 ## Working on it
 
 ```bash
+make dev                       # run locally on the "dev" schema; messages are logged, not sent
 make test                      # unit tests, free
+make dbtest                    # the store's SQL against a throwaway schema
+make backup                    # export every table to ~/companion-backups and prove it restores
 make live                      # 39-thought fixture test + one web lookup against the real API (~$0.85)
 make sql Q="select id, status from thoughts"    # read-only query, no psql needed
 make deploy
 ```
 
-A local `make run` with `BOT_ENABLED=false` does not poll Telegram or nudge on a timer; the
-deployed process owns both. To see what the engine would do right now without sending:
+`make run` uses the real database but does not poll Telegram or nudge on a timer; the deployed
+process owns both. Prefer `make dev` for anything experimental. CI (`.github/workflows`) runs
+vet, unit and database tests on every push, and a nightly job takes an encrypted backup. To see what the engine would do right now without sending:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $API_TOKEN" "https://thought-companion-api.fly.dev/v1/admin/evaluate?dry=1"

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"companion/api/internal/ai"
@@ -58,6 +59,20 @@ type Engine struct {
 	log     *slog.Logger
 	cfg     Config
 	mu      sync.Mutex // one evaluation at a time in this process
+
+	lastTick atomic.Int64            // unix time the ticker last completed, for the health check
+	alert    func(kind, text string) // tells the owner something broke; nil = log only
+}
+
+// SetAlert wires the owner alert. The engine cannot message anyone itself.
+func (e *Engine) SetAlert(fn func(kind, text string)) { e.alert = fn }
+
+// LastTick is when the ticker last completed a pass; zero before the first.
+func (e *Engine) LastTick() time.Time {
+	if v := e.lastTick.Load(); v != 0 {
+		return time.Unix(v, 0)
+	}
+	return time.Time{}
 }
 
 func New(db *store.Store, aiClient *ai.Client, weather *signals.Weather, cfg Config, log *slog.Logger) *Engine {
@@ -150,7 +165,10 @@ func (e *Engine) tick(ctx context.Context) {
 		}
 		e.log.Info("evaluated", "user", u.ID, "outcome", res.Outcome, "reason", res.Reason, "thought", res.ThoughtID)
 	}
-	_ = e.db.PruneBlockedRuns(ctx, 72*time.Hour)
+	if err := e.db.PruneRuns(ctx); err != nil {
+		e.log.Warn("prune decision log", "err", err)
+	}
+	e.lastTick.Store(time.Now().Unix())
 }
 
 // Evaluate runs one decision for one user. Every run is logged, including
@@ -173,7 +191,14 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 	var decisionLog any
 	finish := func(outcome, reason string) (Result, error) {
 		res.Outcome, res.Reason = outcome, reason
-		return res, e.db.FinishRun(ctx, runID, len(res.Scores), res.Scores, decisionLog, outcome, reason)
+		if outcome == "error" && e.alert != nil {
+			e.alert("engine", "The nudge engine hit an error: "+reason)
+		}
+		// Recorded on a context that outlives a shutdown or timeout, so the
+		// log never shows a run as "pending" when it in fact finished.
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		return res, e.db.FinishRun(fctx, runID, len(res.Scores), res.Scores, decisionLog, outcome, reason)
 	}
 
 	prefs, err := e.db.GetPrefs(ctx, user.ID)
@@ -238,13 +263,15 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 	if !pm.Budgeted {
 		lookups = &scoutBudget{why: "no budgeted nudge can go out right now"} // a paid lookup could not lead to a send
 	}
-	none := &scoutBudget{why: "resting after a recent nudge"}
+	none := &scoutBudget{why: "it could not be sent right now anyway"}
 	byID := map[int64]store.Thought{}
 	var eligible []Scored
 	for _, t := range thoughts {
 		byID[t.ID] = t
 		b := lookups
-		if onCooldown(t, now) != "" && !opt.Force {
+		// No paid lookup for a thought that could not be sent whatever it
+		// found: resting after a nudge, or moved to the weekly review.
+		if !opt.Force && (onCooldown(t, now) != "" || t.IgnoredStreak >= reviewOnlyAfter) {
 			b = none
 		}
 		hooks := e.checkHooks(ctx, user, prefs, t, now, b)
@@ -360,6 +387,14 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 	if lane == LaneReview || lane == "" {
 		lane = LaneQuick // only reachable with /nudge, which may pick anything
 	}
+	// The thoughts were read before the lookups and the model call, which
+	// can take minutes. Read this one again: the user may have finished,
+	// dropped or snoozed it in the meantime.
+	if !opt.Force {
+		if fresh, err := e.db.GetThought(ctx, user.ID, t.ID); err != nil || fresh.Status != "active" {
+			return finish("none", fmt.Sprintf("thought #%d changed while I was deciding, so nothing was sent", t.ID))
+		}
+	}
 	nudgeID, err := e.db.CreateNudge(ctx, store.Nudge{
 		UserID: user.ID, ThoughtID: t.ID, DecisionRunID: runID, NudgeType: decision.NudgeType,
 		Message: decision.Message, SuggestedStep: decision.SuggestedStep, Channel: "telegram",
@@ -387,11 +422,21 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 		_ = e.db.MarkNudgeSuppressed(ctx, nudgeID, "delivery failed: "+err.Error())
 		return finish("error", "delivery failed: "+err.Error())
 	}
-	if err := e.db.MarkNudgeSent(ctx, nudgeID, t.ID, msgID); err != nil {
-		e.log.Error("mark nudge sent", "err", err, "nudge", nudgeID)
+	// The message is out. Recording that must not be lost to a shutdown or
+	// a timeout, or the nudge would not count against any limit and another
+	// could follow it. (If every attempt fails, housekeeping adopts the
+	// "scheduled" row as sent ten minutes later.)
+	bctx, cancelB := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancelB()
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err = e.db.MarkNudgeSent(bctx, nudgeID, t.ID, msgID); err == nil {
+			break
+		}
+		e.log.Error("mark nudge sent", "err", err, "nudge", nudgeID, "attempt", attempt)
+		time.Sleep(time.Duration(attempt) * time.Second)
 	}
 	if t.RemindAt != nil {
-		_ = e.db.ClearReminder(ctx, t.ID) // the requested reminder has been delivered
+		_ = e.db.ClearReminder(bctx, t.ID) // the requested reminder has been delivered
 	}
 	return finish("nudged", decision.Reason)
 }

@@ -139,3 +139,19 @@ fixture test and dry runs.
 "The luggage arrives on the 16th" would have produced a deadline reminder the evening before
 and another on the day. A lead of zero now means only on the day; a lead of one or more earns
 the day-before heads-up.
+
+## 2026-11-14 — Design review, and hardening before inviting anyone
+
+A two-pass review (`docs/05-system-review.md`) found the engine sound and the edges weak. The
+user wants three or four invited testers, not scale, so the plan is: stage 0 hardening, stage 1
+"friends", stage 2 accounts and an API when a second client starts, stage 3 (scale) on standby.
+
+Stage 0 choices worth remembering:
+
+- **Backups are a Go exporter, not pg_dump,** so they run on the laptop and in CI with nothing
+  installed, and every backup is restored into a scratch database before it counts.
+- **Development uses a schema, not a second project.** `DB_SCHEMA=dev` plus `DRY_SEND=true`
+  isolates a local run inside the same free database.
+- **At-most-once for nudges.** When it is unclear whether a message went out, it is counted as
+  sent. A missed nudge is better than a repeated one.
+- **Fading is gone.** A thought never leaves the user's view without their decision.

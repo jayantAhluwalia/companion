@@ -209,7 +209,11 @@ func formatReview(r engine.ReviewMessage) string {
 }
 
 // formatList renders /list grouped by type, newest first within a group.
-func formatList(ts []store.Thought) string {
+// listTitleMax keeps one long capture from pushing the whole list past
+// Telegram's 4,096-character limit, which would make /list fail outright.
+const listTitleMax = 70
+
+func formatList(ts []store.Thought, loc *time.Location) string {
 	groups := map[ai.ThoughtType][]store.Thought{}
 	for _, t := range ts {
 		typ := ai.TypeUnclear
@@ -227,13 +231,16 @@ func formatList(ts []store.Thought) string {
 		}
 		fmt.Fprintf(&sb, "\n%s  <b>%s</b>\n", typeIcon(typ), typePlural(typ))
 		for _, t := range items {
-			title := t.RawContent
+			title := strings.Join(strings.Fields(t.RawContent), " ")
 			if t.Interpretation != nil {
 				title = t.Interpretation.Title
 			}
+			if r := []rune(title); len(r) > listTitleMax {
+				title = string(r[:listTitleMax]) + "…"
+			}
 			line := fmt.Sprintf("      #%d  %s", t.ID, Esc(clean(title)))
 			if t.Status == "snoozed" && t.SnoozedUntil != nil {
-				line += fmt.Sprintf("  <i>😴 until %s</i>", t.SnoozedUntil.Format("2 Jan"))
+				line += fmt.Sprintf("  <i>😴 until %s</i>", t.SnoozedUntil.In(loc).Format("2 Jan"))
 			}
 			sb.WriteString(line + "\n")
 		}

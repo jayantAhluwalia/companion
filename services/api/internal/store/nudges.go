@@ -74,49 +74,68 @@ func (s *Store) WakeSnoozed(ctx context.Context, userID int64) error {
 	return err
 }
 
-// FadeAfter is how many nudges in a row may go unanswered before a thought
-// is quietly set aside.
-const FadeAfter = 4
-
-// ExpireNudges closes nudges that got no response within the window. Each
-// one counts as an ignore, which lengthens that thought's cooldown; after
-// FadeAfter in a row the thought fades.
+// ExpireNudges closes nudges that got no response within the window, in one
+// transaction. Only automatic nudges from the budgeted lanes count as an
+// ignore: a deadline notice that was read and needed no tap, or a nudge the
+// user asked for with /nudge, says nothing about whether the timing was bad.
+// It also adopts nudges left "scheduled" by a crash between sending and
+// recording, treating them as sent so they are counted.
 func (s *Store) ExpireNudges(ctx context.Context, userID int64, window time.Duration) (int, error) {
-	rows, err := s.pool.Query(ctx, `
-		update nudges set status = 'expired'
-		where user_id = $1 and status = 'sent' and sent_at < now() - make_interval(secs => $2)
-		returning id, thought_id`, userID, window.Seconds())
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	type pair struct{ nudge, thought int64 }
-	var expired []pair
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		update nudges set status = 'sent', sent_at = created_at
+		where user_id = $1 and status = 'scheduled' and created_at < now() - interval '10 minutes'`, userID); err != nil {
+		return 0, err
+	}
+	rows, err := tx.Query(ctx, `
+		update nudges n set status = 'expired'
+		where n.user_id = $1 and n.status = 'sent' and n.sent_at < now() - make_interval(secs => $2)
+		returning n.id, n.thought_id,
+		          n.lane in ('opportunity', 'quick')
+		            and coalesce((select r.trigger from decision_runs r where r.id = n.decision_run_id), 'ticker') <> 'manual'`,
+		userID, window.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	type expired struct {
+		nudge, thought int64
+		counts         bool
+	}
+	var all []expired
 	for rows.Next() {
-		var p pair
-		if err := rows.Scan(&p.nudge, &p.thought); err != nil {
+		var e expired
+		if err := rows.Scan(&e.nudge, &e.thought, &e.counts); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		expired = append(expired, p)
+		all = append(all, e)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	for _, p := range expired {
+	for _, e := range all {
+		if !e.counts {
+			continue
+		}
 		var streak int
-		if err := s.pool.QueryRow(ctx, `
+		if err := tx.QueryRow(ctx, `
 			update thoughts set ignored_streak = ignored_streak + 1, updated_at = now()
-			where id = $1 returning ignored_streak`, p.thought).Scan(&streak); err != nil {
+			where id = $1 returning ignored_streak`, e.thought).Scan(&streak); err != nil {
 			return 0, err
 		}
-		_ = s.AddEvent(ctx, p.thought, &p.nudge, "nudge_ignored", map[string]any{"streak": streak})
-		if streak >= FadeAfter {
-			_, _ = s.pool.Exec(ctx, `update thoughts set status = 'faded', updated_at = now() where id = $1 and status = 'active'`, p.thought)
-			_ = s.AddEvent(ctx, p.thought, &p.nudge, "status_faded", map[string]any{"after_ignores": streak})
+		payload, _ := json.Marshal(map[string]any{"streak": streak})
+		if _, err := tx.Exec(ctx, `insert into thought_events (thought_id, nudge_id, type, payload) values ($1, $2, 'nudge_ignored', $3)`,
+			e.thought, e.nudge, payload); err != nil {
+			return 0, err
 		}
 	}
-	return len(expired), nil
+	return len(all), tx.Commit(ctx)
 }
 
 // Load is how much the user has been sent lately. Deadline and requested
@@ -138,16 +157,18 @@ func (s *Store) NudgeLoad(ctx context.Context, userID int64, dayStart, now time.
 	weekStart := now.Add(-7 * 24 * time.Hour)
 	err := s.pool.QueryRow(ctx, `
 		with n as (
-			select n.sent_at, n.lane, coalesce(r.trigger, 'ticker') <> 'manual' as auto
+			-- A nudge still "scheduled" may have been delivered just before a
+			-- failed write, so it is counted from the moment it was created.
+			select coalesce(n.sent_at, n.created_at) as sent_at, n.lane, coalesce(r.trigger, 'ticker') <> 'manual' as auto
 			  from nudges n left join decision_runs r on r.id = n.decision_run_id
-			 where n.user_id = $1 and n.sent_at is not null
+			 where n.user_id = $1 and n.status in ('scheduled', 'sent', 'responded', 'expired')
 		)
 		select count(*) filter (where auto and sent_at >= $2 and lane in ('opportunity', 'quick')),
 		       count(*) filter (where auto and sent_at >= $2 and lane in ('deadline', 'requested')),
 		       count(*) filter (where auto and sent_at >= $3 and lane in ('opportunity', 'quick')),
 		       count(*) filter (where auto and sent_at >= $3 and lane = 'quick'),
 		       max(sent_at),
-		       (select count(*) from reviews where user_id = $1 and sent_at >= $3)
+		       (select count(*) from reviews where user_id = $1 and sent_at >= $3 and trigger = 'scheduled')
 		  from n`, userID, dayStart, weekStart,
 	).Scan(&l.BudgetedToday, &l.ObligationToday, &l.BudgetedWeek, &l.QuickWeek, &l.LastSent, &l.ReviewsWeek)
 	if err != nil {
@@ -213,8 +234,10 @@ type Tally struct {
 }
 
 // WindowTallies counts outcomes per send window over the last six months,
-// using only nudges sent before the given time so that a day's choice of
-// window does not shift while the day is in progress. "Later" and "Not
+// using only nudges sent more than a day before the given time. By then
+// every one has its final outcome (an unanswered nudge expires after 24
+// hours), so a day's choice of window cannot shift while the day is in
+// progress. "Later" and "Not
 // interested" are left out: the first is neutral, the second is about the
 // thought, not the timing.
 func (s *Store) WindowTallies(ctx context.Context, userID int64, before time.Time) (map[string]Tally, error) {
@@ -225,7 +248,7 @@ func (s *Store) WindowTallies(ctx context.Context, userID int64, before time.Tim
 		       count(*) filter (where status = 'expired')
 		  from nudges
 		 where user_id = $1 and send_window is not null and lane in ('opportunity', 'quick')
-		   and sent_at < $2 and sent_at >= $2 - interval '180 days'
+		   and sent_at < $2::timestamptz - interval '24 hours' and sent_at >= $2::timestamptz - interval '180 days'
 		 group by send_window`, userID, before)
 	if err != nil {
 		return nil, err
@@ -340,9 +363,13 @@ func (s *Store) StartRun(ctx context.Context, userID int64, trigger string) (int
 }
 
 func (s *Store) FinishRun(ctx context.Context, runID int64, candidateCount int, scores, llmDecision any, outcome, reason string) error {
+	// A nil slice inside an interface is not a nil interface, and it
+	// marshals to the JSON value null. The column must always hold a list.
 	scoresJSON := []byte("[]")
 	if scores != nil {
-		scoresJSON, _ = json.Marshal(scores)
+		if b, err := json.Marshal(scores); err == nil && string(b) != "null" {
+			scoresJSON = b
+		}
 	}
 	var decisionJSON []byte
 	if llmDecision != nil {
@@ -398,11 +425,21 @@ func (s *Store) LastModelPass(ctx context.Context, userID int64) (*time.Time, er
 	return at, err
 }
 
-// PruneBlockedRuns keeps the decision log readable: gate-blocked ticks are
-// only interesting for a few days.
-func (s *Store) PruneBlockedRuns(ctx context.Context, olderThan time.Duration) error {
-	_, err := s.pool.Exec(ctx, `delete from decision_runs where outcome = 'blocked' and started_at < now() - make_interval(secs => $1)
-		and not exists (select 1 from nudges n where n.decision_run_id = decision_runs.id)`, olderThan.Seconds())
+// PruneRuns keeps the decision log from growing without bound. Blocked
+// ticks are only interesting for a few days; runs interrupted before they
+// finished are noise; and after a month a run keeps its outcome and reason
+// but loses the per-thought detail, which is the bulky part.
+func (s *Store) PruneRuns(ctx context.Context) error {
+	if _, err := s.pool.Exec(ctx, `
+		delete from decision_runs d
+		 where ((outcome = 'blocked' and started_at < now() - interval '3 days')
+		     or (outcome = 'pending' and started_at < now() - interval '1 day'))
+		   and not exists (select 1 from nudges n where n.decision_run_id = d.id)`); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		update decision_runs set scores = '[]'
+		 where started_at < now() - interval '30 days' and scores <> '[]'`)
 	return err
 }
 
@@ -512,7 +549,12 @@ func (s *Store) TryLock(ctx context.Context, key int64) (unlock func(), ok bool,
 		return nil, false, err
 	}
 	return func() {
-		_, _ = conn.Exec(context.Background(), `select pg_advisory_unlock($1)`, key)
+		// Bounded, so a dead connection cannot hang the ticker for good.
+		uctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(uctx, `select pg_advisory_unlock($1)`, key); err != nil {
+			_ = conn.Conn().Close(uctx) // closing the session releases the lock
+		}
 		conn.Release()
 	}, true, nil
 }

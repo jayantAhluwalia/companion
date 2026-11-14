@@ -321,7 +321,15 @@ func (e *Engine) webState(ctx context.Context, user store.User, p store.Prefs, t
 	})
 	if err != nil {
 		e.log.Error("scout", "err", err, "thought", t.ID)
-		return HookState{Kind: ai.HookWeb, State: StateUnknown, Summary: "the web lookup failed"}
+		// Remember the failure for a few hours. Without this, a lookup that
+		// keeps failing would be retried on every run and, being first in
+		// line, would use up the day's lookups for everything else.
+		failed := store.Signal{ThoughtID: t.ID, HookKey: key, Kind: ai.HookWeb, State: StateUnknown,
+			Summary: "the web lookup failed; I will try again later", Facts: []byte("{}"), FetchedAt: now, ExpiresAt: now.Add(6 * time.Hour)}
+		if uerr := e.db.UpsertSignal(ctx, failed); uerr != nil {
+			e.log.Warn("store failed signal", "err", uerr)
+		}
+		return stateFromSignal(failed)
 	}
 
 	sig := store.Signal{ThoughtID: t.ID, HookKey: key, Kind: ai.HookWeb, State: StateWaiting,

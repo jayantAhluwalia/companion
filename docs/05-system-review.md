@@ -25,7 +25,24 @@ engine does not know which channel delivers. The weaknesses are around that core
 | No `.dockerignore` | `.env` was sent to the image builder with the build context | Added. |
 | Answering a thought in the weekly review matched its number anywhere in the button data | Thought #3 in review #3 would have cleared every row | Matches the full `rv:<review>:<thought>:` prefix. |
 
-## 3. Open findings that matter with one user
+## 2a. Stage 0 (hardening) — done 14 Nov 2026
+
+| Finding | What was done |
+|---|---|
+| 1. Captures stuck uninterpreted | A sweep at start and every three minutes retries them, up to three attempts, and tells the user what is true at each stage. |
+| 2. Duplicates after a restart | The Telegram offset is stored in the database; a capture is keyed by its message id. |
+| 3. No backups | `cmd/backup` exports every table and proves the file restores. `make backup` locally; a nightly encrypted GitHub job (needs two repository secrets). The first restore check found a real defect (a JSON null where a list belonged), now fixed and constrained. |
+| 4. Send and record not atomic | Post-send bookkeeping runs on a context that cannot be cancelled, with retries; a nudge left "scheduled" counts as sent and is adopted after ten minutes. |
+| 5. Ignores counted too broadly; silent fading | Only automatic budgeted nudges count as ignored, in one transaction. "Faded" is retired: such thoughts wait in the weekly review. |
+| 6. `/review` using the budget | On-request reviews are recorded as such and are free. |
+| 7. No alerting | `/healthz` reports the database, the Telegram poll and the ticker; engine errors and repeated interpretation failures message the owner, at most hourly per kind. |
+| 8. Local runs on production | `make dev` uses a separate `dev` schema and logs outgoing messages instead of sending. `make run` no longer polls or ticks. |
+| 9. No CI, SQL untested | `.github/workflows/ci.yml` runs vet, unit tests and database tests on every push. The database tests apply all migrations to an empty schema and caught a broken query before it shipped. |
+| 10, 12, 13, 14, parts of 11 and 15 | Thought re-read before sending; failed lookups cached; no lookups for thoughts that cannot be sent; unknown models priced at the dearest rate; decision log pruned and indexed; `/list` clipped and in local time; stale buttons refuse finished thoughts; non-text messages get a reply; the container runs unprivileged. |
+
+Still open from section 3: splitting `/why` when it runs long (11), and the rest of 15.
+
+## 3. Findings that mattered with one user (as reviewed)
 
 Ranked. "Where" is relative to `services/api/internal`.
 

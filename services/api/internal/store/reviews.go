@@ -85,9 +85,12 @@ func (s *Store) WeekSummary(ctx context.Context, userID int64) (WeekSummary, err
 	return w, err
 }
 
-func (s *Store) CreateReview(ctx context.Context, userID int64, itemCount int) (int64, error) {
+// CreateReview records a review. trigger is "scheduled" for the weekly one
+// and "manual" for /review; only scheduled reviews count against the budget.
+func (s *Store) CreateReview(ctx context.Context, userID int64, itemCount int, trigger string) (int64, error) {
 	var id int64
-	err := s.pool.QueryRow(ctx, `insert into reviews (user_id, item_count) values ($1, $2) returning id`, userID, itemCount).Scan(&id)
+	err := s.pool.QueryRow(ctx, `insert into reviews (user_id, item_count, trigger) values ($1, $2, $3) returning id`,
+		userID, itemCount, trigger).Scan(&id)
 	return id, err
 }
 
@@ -108,9 +111,11 @@ type Review struct {
 	TapCount  int
 }
 
-// LastReviews returns the newest reviews first.
+// LastReviews returns the newest scheduled reviews first. Reviews the user
+// asked for are left out: they must not delay or pause the weekly one.
 func (s *Store) LastReviews(ctx context.Context, userID int64, limit int) ([]Review, error) {
-	rows, err := s.pool.Query(ctx, `select sent_at, item_count, tap_count from reviews where user_id = $1 order by sent_at desc limit $2`, userID, limit)
+	rows, err := s.pool.Query(ctx, `select sent_at, item_count, tap_count from reviews
+		where user_id = $1 and trigger = 'scheduled' order by sent_at desc limit $2`, userID, limit)
 	if err != nil {
 		return nil, err
 	}

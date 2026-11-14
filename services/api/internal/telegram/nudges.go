@@ -61,6 +61,13 @@ func (b *Bot) EvaluateNow(ctx context.Context, opt engine.Options) (engine.Resul
 // nudgeResponse records a button press on a nudge and returns the toast.
 func (b *Bot) nudgeResponse(ctx context.Context, user store.User, action string, thoughtID, nudgeID int64) string {
 	chat := user.TelegramChatID
+	// An old message's buttons still work after the thought has moved on.
+	// "Later" on something already done must not bring it back to life.
+	if cur, err := b.db.GetThought(ctx, user.ID, thoughtID); err != nil {
+		return "I couldn't find that thought."
+	} else if cur.Status == "done" || cur.Status == "archived" {
+		return map[string]string{"done": "That one is already done.", "archived": "That one was already let go."}[cur.Status]
+	}
 	if nudgeID != 0 {
 		if err := b.db.RespondNudge(ctx, nudgeID, action); err != nil {
 			b.log.Warn("respond nudge", "err", err, "nudge", nudgeID)

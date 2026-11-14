@@ -86,7 +86,11 @@ func (e *Engine) Review(ctx context.Context, user store.User, onRequest bool) (b
 	if err != nil {
 		return false, "", err
 	}
-	id, err := e.db.CreateReview(ctx, user.ID, len(items)+len(checkIns))
+	trigger := "scheduled"
+	if onRequest {
+		trigger = "manual" // asked for with /review: free, and it does not delay the weekly one
+	}
+	id, err := e.db.CreateReview(ctx, user.ID, len(items)+len(checkIns), trigger)
 	if err != nil {
 		return false, "", err
 	}

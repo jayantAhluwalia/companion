@@ -13,18 +13,19 @@ import (
 )
 
 type Thought struct {
-	ID             int64
-	UserID         int64
-	RawContent     string
-	Status         string
-	SnoozedUntil   *time.Time
-	CreatedAt      time.Time
-	LastTouchedAt  time.Time
-	LastNudgedAt   *time.Time
-	NudgeCount     int
-	IgnoredStreak  int
-	RemindAt       *time.Time      // set when the user said when to bring it back
-	Interpretation *Interpretation // current version, nil until interpreted
+	ID                int64
+	UserID            int64
+	RawContent        string
+	Status            string
+	SnoozedUntil      *time.Time
+	CreatedAt         time.Time
+	LastTouchedAt     time.Time
+	LastNudgedAt      *time.Time
+	NudgeCount        int
+	IgnoredStreak     int
+	RemindAt          *time.Time // set when the user said when to bring it back
+	InterpretAttempts int
+	Interpretation    *Interpretation // current version, nil until interpreted
 }
 
 type Interpretation struct {
@@ -40,17 +41,78 @@ type Interpretation struct {
 
 var ErrNotFound = errors.New("not found")
 
-func (s *Store) CreateThought(ctx context.Context, userID int64, raw, source string) (Thought, error) {
-	var t Thought
-	err := s.pool.QueryRow(ctx, `
-		insert into thoughts (user_id, raw_content, source) values ($1, $2, $3)
-		returning id, user_id, raw_content, status, created_at, last_touched_at`,
-		userID, raw, source,
-	).Scan(&t.ID, &t.UserID, &t.RawContent, &t.Status, &t.CreatedAt, &t.LastTouchedAt)
-	if err != nil {
-		return t, err
+// CreateThought saves a capture. messageID is the channel's id for the
+// message it came from (0 if none); a second capture of the same message
+// returns created = false and saves nothing, so a redelivered update after a
+// restart cannot produce a duplicate thought.
+func (s *Store) CreateThought(ctx context.Context, userID int64, raw, source string, messageID int64) (t Thought, created bool, err error) {
+	var mid *int64
+	if messageID != 0 {
+		mid = &messageID
 	}
-	return t, s.AddEvent(ctx, t.ID, nil, "created", nil)
+	err = s.pool.QueryRow(ctx, `
+		insert into thoughts (user_id, raw_content, source, source_message_id) values ($1, $2, $3, $4)
+		on conflict (user_id, source_message_id) where source_message_id is not null do nothing
+		returning id, user_id, raw_content, status, created_at, last_touched_at`,
+		userID, raw, source, mid,
+	).Scan(&t.ID, &t.UserID, &t.RawContent, &t.Status, &t.CreatedAt, &t.LastTouchedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return t, false, nil
+	}
+	if err != nil {
+		return t, false, err
+	}
+	return t, true, s.AddEvent(ctx, t.ID, nil, "created", nil)
+}
+
+// MaxInterpretAttempts is how many times a thought is sent to the model
+// before the app gives up and keeps the person's original words.
+const MaxInterpretAttempts = 3
+
+// CountInterpretAttempt records that an interpretation is about to be tried.
+func (s *Store) CountInterpretAttempt(ctx context.Context, thoughtID int64) error {
+	_, err := s.pool.Exec(ctx, `update thoughts set interpret_attempts = interpret_attempts + 1 where id = $1`, thoughtID)
+	return err
+}
+
+// Uninterpreted returns captures that still have no interpretation after
+// the grace period: the first attempt failed, timed out or was cut off by a
+// restart. Without this they would sit unread forever.
+func (s *Store) Uninterpreted(ctx context.Context, olderThan time.Duration) ([]Thought, error) {
+	rows, err := s.pool.Query(ctx, thoughtSelect+`
+		where t.current_interpretation_id is null and t.status = 'active'
+		  and t.interpret_attempts < $1 and t.created_at < now() - make_interval(secs => $2)
+		order by t.id limit 20`, MaxInterpretAttempts, olderThan.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Thought
+	for rows.Next() {
+		t, err := scanThought(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// GetKV and SetKV hold small durable state for the process itself.
+func (s *Store) GetKV(ctx context.Context, key string) (string, error) {
+	var v string
+	err := s.pool.QueryRow(ctx, `select value from kv where key = $1`, key).Scan(&v)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return v, err
+}
+
+func (s *Store) SetKV(ctx context.Context, key, value string) error {
+	_, err := s.pool.Exec(ctx, `
+		insert into kv (key, value) values ($1, $2)
+		on conflict (key) do update set value = excluded.value, updated_at = now()`, key, value)
+	return err
 }
 
 // AddInterpretation stores a new version and makes it current. source is
@@ -149,7 +211,7 @@ func (s *Store) ClearReminder(ctx context.Context, thoughtID int64) error {
 
 const thoughtSelect = `
 	select t.id, t.user_id, t.raw_content, t.status, t.snoozed_until, t.created_at, t.last_touched_at,
-	       t.last_nudged_at, t.nudge_count, t.ignored_streak, t.remind_at,
+	       t.last_nudged_at, t.nudge_count, t.ignored_streak, t.remind_at, t.interpret_attempts,
 	       i.id, i.version, i.source, coalesce(i.model, ''), coalesce(i.prompt_version, ''), i.created_at,
 	       i.type, i.title, i.description, i.desired_outcome, i.next_steps, i.confidence,
 	       i.clarification_needed, i.clarification_question, i.assumptions, i.timeframe, i.hooks, i.urgency
@@ -166,7 +228,7 @@ func scanThought(row pgx.Row) (Thought, error) {
 	var iConf *float64
 	var iClar *bool
 	err := row.Scan(&t.ID, &t.UserID, &t.RawContent, &t.Status, &t.SnoozedUntil, &t.CreatedAt, &t.LastTouchedAt,
-		&t.LastNudgedAt, &t.NudgeCount, &t.IgnoredStreak, &t.RemindAt,
+		&t.LastNudgedAt, &t.NudgeCount, &t.IgnoredStreak, &t.RemindAt, &t.InterpretAttempts,
 		&iID, &iVersion, &iSource, &iModel, &iPrompt, &iCreated,
 		&iType, &iTitle, &iDesc, &iOutcome, &iSteps, &iConf, &iClar, &iQuestion, &iAssumptions, &iTimeframe, &iHooks, &iUrgency)
 	if err != nil {
