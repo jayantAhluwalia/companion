@@ -69,10 +69,13 @@ func TestMessagesAreValidHTML(t *testing.T) {
 
 	review := formatReview(engine.ReviewMessage{
 		Week:     store.WeekSummary{Sent: 3, Acted: 2, Done: 2, Captured: 4},
-		CheckIns: []store.ReviewItem{{ThoughtID: 3, Title: "Wardrobe <light>", Type: "idea_possibility"}},
-		Items: []store.ReviewItem{{ThoughtID: 2, Title: "Bir Billing & beyond", Type: "experience_interest", AgeDays: 12},
-			{ThoughtID: 4, Title: "Buy lowers for winter", Type: "actionable_intention", AgeDays: 2}},
+		CheckIns: []store.ReviewItem{{ThoughtID: 31, Number: 3, Title: "Wardrobe <light>", Type: "idea_possibility"}},
+		Items: []store.ReviewItem{{ThoughtID: 20, Number: 2, Title: "Bir Billing & beyond", Type: "experience_interest", AgeDays: 12},
+			{ThoughtID: 40, Number: 4, Title: "Buy lowers for winter", Type: "actionable_intention", AgeDays: 2}},
 	})
 	balanced(t, "review", review)
+	if strings.Contains(review, "#31") || strings.Contains(review, "#20") || !strings.Contains(review, "#3 ") {
+		t.Errorf("a review shows the person's own numbers, never internal ids:\n%s", review)
+	}
 	t.Logf("\n%s", review)
 }

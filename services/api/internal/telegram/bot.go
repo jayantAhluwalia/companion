@@ -23,13 +23,15 @@ import (
 // plus onboarding, corrections, status commands and nudge delivery.
 // Everything is persisted through the store.
 type Bot struct {
-	client      *Client
-	ai          *ai.Client
-	db          *store.Store
-	eng         *engine.Engine
-	weather     *signals.Weather
-	log         *slog.Logger
-	allowedChat int64 // 0 = not locked yet; the bot then only tells callers their id
+	client       *Client
+	ai           *ai.Client
+	db           *store.Store
+	eng          *engine.Engine
+	weather      *signals.Weather
+	log          *slog.Logger
+	allowedChat  int64   // the owner's chat; 0 = not configured yet, the bot then only tells callers their id
+	globalBudget float64 // service-wide monthly model budget, for refusing work and for /cost
+	username     string  // the bot's own @name, for building invite links
 
 	mu       sync.Mutex
 	followOn map[int64]*time.Timer // per user: a pending "while you're here" check
@@ -37,9 +39,9 @@ type Bot struct {
 	lastPoll atomic.Int64          // unix time of the last successful poll, for the health check
 }
 
-func NewBot(client *Client, aiClient *ai.Client, db *store.Store, eng *engine.Engine, weather *signals.Weather, allowedChat int64, log *slog.Logger) *Bot {
-	return &Bot{client: client, ai: aiClient, db: db, eng: eng, weather: weather, log: log, allowedChat: allowedChat,
-		followOn: map[int64]*time.Timer{}, alerted: map[string]time.Time{}}
+func NewBot(client *Client, aiClient *ai.Client, db *store.Store, eng *engine.Engine, weather *signals.Weather, ownerChat int64, globalBudget float64, log *slog.Logger) *Bot {
+	return &Bot{client: client, ai: aiClient, db: db, eng: eng, weather: weather, log: log, allowedChat: ownerChat,
+		globalBudget: globalBudget, followOn: map[int64]*time.Timer{}, alerted: map[string]time.Time{}}
 }
 
 // AllowedChat is the chat the bot will proactively message (nudges).
@@ -49,9 +51,15 @@ func (b *Bot) AllowedChat() int64 { return b.allowedChat }
 // outage must never take the API process down.
 func (b *Bot) Run(ctx context.Context) {
 	if me, err := b.client.GetMe(ctx); err == nil {
+		b.username = me.Username
 		b.log.Info("telegram bot ready", "username", me.Username)
 	} else {
 		b.log.Error("telegram getMe failed", "err", err)
+	}
+	if b.allowedChat != 0 {
+		if _, err := b.db.EnsureOwner(ctx, b.allowedChat, ""); err != nil {
+			b.log.Error("ensure owner", "err", err)
+		}
 	}
 	_ = b.client.SetMyCommands(ctx, []BotCommand{
 		{Command: "list", Description: "Your active thoughts"},
@@ -65,6 +73,8 @@ func (b *Bot) Run(ctx context.Context) {
 		{Command: "pause", Description: "Stop nudges until /resume"},
 		{Command: "resume", Description: "Turn nudges back on"},
 		{Command: "cost", Description: "This month's AI spend"},
+		{Command: "export", Description: "Send me everything you hold about me"},
+		{Command: "forget", Description: "Delete everything you hold about me"},
 		{Command: "start", Description: "What this bot does"},
 	})
 
@@ -150,6 +160,9 @@ func (b *Bot) sweep(ctx context.Context) {
 			if err != nil {
 				continue
 			}
+			if over, _ := b.overBudget(ctx, user); over {
+				continue // kept as written; picked up again when the budget returns
+			}
 			b.log.Info("retrying interpretation", "thought", t.ID)
 			b.interpret(user, t.ID, t.RawContent, "")
 		}
@@ -160,8 +173,6 @@ func (b *Bot) sweep(ctx context.Context) {
 		}
 	}
 }
-
-func (b *Bot) allowed(chatID int64) bool { return b.allowedChat != 0 && chatID == b.allowedChat }
 
 func (b *Bot) handle(ctx context.Context, u Update) {
 	switch {
@@ -175,26 +186,14 @@ func (b *Bot) handle(ctx context.Context, u Update) {
 func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 	chat := m.Chat.ID
 	text := strings.TrimSpace(m.Text)
+	user, ok := b.resolveUser(ctx, m)
+	if !ok {
+		return
+	}
 	if text == "" {
 		// A photo, voice note, sticker or location. Say so, or the person
 		// will think it was saved.
-		if b.allowed(chat) {
-			b.reply(ctx, chat, "🙈  I can only read text for now, so that one wasn't saved. Type it and I'll keep it.")
-		}
-		return
-	}
-	if !b.allowed(chat) {
-		b.reply(ctx, chat, fmt.Sprintf("This bot is private. Chat id: %d\nSet TELEGRAM_CHAT_ID to this value on the server to enable it.", chat))
-		return
-	}
-	name := ""
-	if m.From != nil {
-		name = m.From.FirstName
-	}
-	user, err := b.db.GetOrCreateUser(ctx, chat, name)
-	if err != nil {
-		b.log.Error("get user", "err", err)
-		b.reply(ctx, chat, "Something went wrong on my side. Try again in a moment.")
+		b.reply(ctx, chat, "🙈  I can only read text for now, so that one wasn't saved. Type it and I'll keep it.")
 		return
 	}
 
@@ -241,12 +240,15 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 			b.reply(ctx, chat, "🔕  Nudges paused. I'll keep collecting your thoughts.\n<i>/resume turns them back on.</i>")
 		}
 	case cmd == "/cost":
-		cost, n, err := b.db.MonthlyCostUSD(ctx)
-		if err != nil {
-			b.reply(ctx, chat, "Couldn't read the cost log.")
-			return
-		}
-		b.reply(ctx, chat, fmt.Sprintf("💸  <b>This month</b>\n%d AI calls · about $%.2f", n, cost))
+		b.cost(ctx, user)
+	case cmd == "/invite":
+		b.invite(ctx, user)
+	case cmd == "/users":
+		b.users(ctx, user)
+	case cmd == "/forget":
+		b.forgetAsk(ctx, user)
+	case cmd == "/export":
+		b.export(ctx, user)
 	case strings.HasPrefix(cmd, "/"):
 		b.reply(ctx, chat, "🤷  I don't know that one. Just send me a thought, or /list.")
 	case isChatter(text):
@@ -269,6 +271,14 @@ func userNow(u store.User) time.Time {
 // captureThought follows product principle 1: save and acknowledge instantly,
 // then let the interpretation arrive when it is ready.
 func (b *Bot) captureThought(ctx context.Context, user store.User, raw string, messageID int64) {
+	// A daily ceiling per person. It exists for the case that should never
+	// happen (a stuck client, a script) and is set far above real use.
+	if prefs, err := b.db.GetPrefs(ctx, user.ID); err == nil {
+		if n, err := b.db.CapturesSince(ctx, user.ID, time.Now().Add(-24*time.Hour)); err == nil && n >= prefs.CapturesPerDay {
+			b.reply(ctx, user.TelegramChatID, fmt.Sprintf("🧺  That's %d thoughts in a day, which is my limit. I haven't saved this one; send it again tomorrow.", n))
+			return
+		}
+	}
 	t, created, err := b.db.CreateThought(ctx, user.ID, raw, "telegram", messageID)
 	if err != nil {
 		b.log.Error("create thought", "err", err)
@@ -277,6 +287,12 @@ func (b *Bot) captureThought(ctx context.Context, user store.User, raw string, m
 	}
 	if !created {
 		b.log.Info("duplicate delivery ignored", "message", messageID)
+		return
+	}
+	// Saving is free; reading it costs money. Out of budget, the thought is
+	// kept in the person's own words and read when the budget returns.
+	if over, why := b.overBudget(ctx, user); over {
+		b.reply(ctx, user.TelegramChatID, "✍️  Saved in your own words. I can't read it properly yet because "+why+"; I'll catch up when it resets.")
 		return
 	}
 	b.reply(ctx, user.TelegramChatID, "✍️  Got it.")
@@ -376,7 +392,15 @@ func (b *Bot) interpret(user store.User, thoughtID int64, raw, clarification str
 		}
 		return
 	}
-	b.sendInterpretation(ctx, user.TelegramChatID, thoughtID, interp)
+	b.sendInterpretation(ctx, user.TelegramChatID, thoughtID, b.numberOf(ctx, user.ID, thoughtID), interp)
+}
+
+// numberOf returns the number a person sees for one of their thoughts.
+func (b *Bot) numberOf(ctx context.Context, userID, thoughtID int64) int {
+	if t, err := b.db.GetThought(ctx, userID, thoughtID); err == nil {
+		return t.Number
+	}
+	return 0
 }
 
 // chatter is the set of messages that are plainly talk, not thoughts. It is
@@ -425,8 +449,8 @@ func interpretationKeyboard(thoughtID int64, i ai.Interpretation) *InlineKeyboar
 	return &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-func (b *Bot) sendInterpretation(ctx context.Context, chat int64, thoughtID int64, i ai.Interpretation) {
-	if _, err := b.client.SendMessage(ctx, chat, formatInterpretation(thoughtID, i), interpretationKeyboard(thoughtID, i)); err != nil {
+func (b *Bot) sendInterpretation(ctx context.Context, chat int64, thoughtID int64, number int, i ai.Interpretation) {
+	if _, err := b.client.SendMessage(ctx, chat, formatInterpretation(number, i), interpretationKeyboard(thoughtID, i)); err != nil {
 		b.log.Error("send interpretation", "err", err)
 	}
 }
@@ -451,16 +475,17 @@ func (b *Bot) statusCommand(ctx context.Context, user store.User, cmd, arg strin
 		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("Which one? e.g. %s 12 (numbers are in /list)", cmd))
 		return
 	}
-	id, err := strconv.ParseInt(strings.TrimPrefix(fields[0], "#"), 10, 64)
+	number, err := strconv.Atoi(strings.TrimPrefix(fields[0], "#"))
 	if err != nil {
 		b.reply(ctx, user.TelegramChatID, "That doesn't look like a thought number.")
 		return
 	}
-	t, err := b.db.GetThought(ctx, user.ID, id)
+	t, err := b.db.GetThoughtByNumber(ctx, user.ID, number)
 	if errors.Is(err, store.ErrNotFound) {
-		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("I don't have a thought #%d. /list shows the numbers.", id))
+		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("I don't have a thought #%d. /list shows the numbers.", number))
 		return
 	}
+	id := t.ID
 	if err != nil {
 		b.log.Error("get thought", "err", err)
 		return
@@ -493,14 +518,14 @@ func (b *Bot) statusCommand(ctx context.Context, user store.User, cmd, arg strin
 }
 
 func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
-	if q.Message == nil || !b.allowed(q.Message.Chat.ID) {
+	if q.Message == nil || q.Message.Chat.Type != "private" {
 		_ = b.client.AnswerCallbackQuery(ctx, q.ID, "")
 		return
 	}
 	chat, msgID := q.Message.Chat.ID, q.Message.MessageID
-	user, err := b.db.GetOrCreateUser(ctx, chat, "")
-	if err != nil {
-		_ = b.client.AnswerCallbackQuery(ctx, q.ID, "Something went wrong.")
+	user, found, err := b.db.UserByChat(ctx, chat)
+	if err != nil || !found {
+		_ = b.client.AnswerCallbackQuery(ctx, q.ID, "")
 		return
 	}
 	// Callback data is "action:arg1:arg2:arg3"; the last part may itself
@@ -511,7 +536,15 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 	}
 	action := parts[0]
 	id, _ := strconv.ParseInt(parts[1], 10, 64)
-	b.log.Info("callback", "action", action, "data", q.Data)
+	b.log.Info("callback", "action", action, "user", user.ID)
+
+	// Nothing below runs until every id in the button data has been checked
+	// against the person who pressed it.
+	if refusal := b.authorize(ctx, user, action, parts); refusal != "" {
+		b.log.Warn("callback refused", "action", action, "user", user.ID, "data", q.Data)
+		_ = b.client.AnswerCallbackQuery(ctx, q.ID, refusal)
+		return
+	}
 
 	toast := "Noted."
 	switch action {
@@ -529,7 +562,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 				// and an unclear thought is never nudged or reviewed. Ask
 				// what it is, or keeping it would change nothing.
 				kb := correctionKeyboard(id)
-				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(id, t.Interpretation.Interpretation)+"\n\n<i>Kept. What kind of thing is it?</i>", &kb)
+				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(t.Number, t.Interpretation.Interpretation)+"\n\n<i>Kept. What kind of thing is it?</i>", &kb)
 				toast = "Kept."
 			}
 		}
@@ -541,7 +574,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 			calm := t.Interpretation.Interpretation
 			calm.Urgency = ai.UrgencyWhenever
 			if _, err := b.db.AddInterpretation(ctx, id, "user", calm, "", ""); err == nil {
-				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(id, calm), interpretationKeyboard(id, calm))
+				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(t.Number, calm), interpretationKeyboard(id, calm))
 				toast = "Okay, no rush."
 			}
 		}
@@ -564,6 +597,8 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 	case "rt":
 		toast = ""
 		b.ask(ctx, user, parts[1], false)
+	case "fg":
+		toast = b.forgetAnswer(ctx, user, parts[1], msgID)
 	}
 	_ = b.client.AnswerCallbackQuery(ctx, q.ID, toast)
 }

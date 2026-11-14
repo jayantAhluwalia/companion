@@ -22,14 +22,37 @@ func (b *Bot) SendNudge(ctx context.Context, n engine.Outgoing) (string, error) 
 	}}
 	m, err := b.client.SendMessage(ctx, n.ChatID, formatNudge(n), kb)
 	if err != nil {
+		b.stopIfBlocked(ctx, n.ChatID, err)
 		return "", err
 	}
 	return fmt.Sprint(m.MessageID), nil
 }
 
+// stopIfBlocked turns proactive messages off for someone who has blocked
+// the bot. Otherwise the engine would keep paying for a model call every
+// few hours to write a nudge that can never arrive.
+func (b *Bot) stopIfBlocked(ctx context.Context, chatID int64, err error) {
+	if !IsBlocked(err) {
+		return
+	}
+	if u, found, lookupErr := b.db.UserByChat(ctx, chatID); lookupErr == nil && found {
+		if err := b.db.SetBlocked(ctx, u.ID); err == nil {
+			b.log.Info("user has blocked the bot; nudges off", "user", u.ID)
+		}
+	}
+}
+
 // nudgeNow is /nudge: the user asks for the best thing to bring up now, so
 // gates, cooldowns and the score bar are skipped.
 func (b *Bot) nudgeNow(ctx context.Context, user store.User) {
+	if n, err := b.db.ManualRunsSince(ctx, user.ID, time.Now().Add(-24*time.Hour)); err == nil && n >= nudgesOnRequestPerDay {
+		b.reply(ctx, user.TelegramChatID, fmt.Sprintf("🙂  That's %d today, which is my limit for nudges on request. /list shows everything I'm holding.", n))
+		return
+	}
+	if over, why := b.overBudget(ctx, user); over {
+		b.reply(ctx, user.TelegramChatID, "I can't write a nudge right now because "+why+". /list still works.")
+		return
+	}
 	b.reply(ctx, user.TelegramChatID, "🔎  Looking for the best thing to bring up…")
 	go func() {
 		ectx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -51,7 +74,7 @@ func (b *Bot) EvaluateNow(ctx context.Context, opt engine.Options) (engine.Resul
 	if b.allowedChat == 0 {
 		return engine.Result{}, engine.ErrNoUser
 	}
-	user, err := b.db.GetOrCreateUser(ctx, b.allowedChat, "")
+	user, err := b.db.EnsureOwner(ctx, b.allowedChat, "")
 	if err != nil {
 		return engine.Result{}, err
 	}
@@ -90,7 +113,7 @@ func (b *Bot) nudgeResponse(ctx context.Context, user store.User, action string,
 		if action == "do_it" {
 			head = "🚀  <b>Nice.</b> Here is the path for <b>" + Esc(clean(t.Interpretation.Title)) + "</b>"
 		}
-		b.reply(ctx, chat, head+"\n"+formatSteps(t.Interpretation.NextSteps)+fmt.Sprintf("\n\n<i>When it's finished: /done %d</i>", thoughtID))
+		b.reply(ctx, chat, head+"\n"+formatSteps(t.Interpretation.NextSteps)+fmt.Sprintf("\n\n<i>When it's finished: /done %d</i>", t.Number))
 		if action == "do_it" {
 			return "Nice. Let's go."
 		}
@@ -206,18 +229,21 @@ func (b *Bot) SendReview(ctx context.Context, r engine.ReviewMessage) error {
 	var rows [][]InlineKeyboardButton
 	for _, it := range r.CheckIns {
 		rows = append(rows, []InlineKeyboardButton{
-			btn(fmt.Sprintf("#%d  ✅ Done", it.ThoughtID), d(it.ThoughtID, "y")),
-			btn(fmt.Sprintf("#%d  Not yet", it.ThoughtID), d(it.ThoughtID, "n")),
+			btn(fmt.Sprintf("#%d  ✅ Done", it.Number), d(it.ThoughtID, "y")),
+			btn(fmt.Sprintf("#%d  Not yet", it.Number), d(it.ThoughtID, "n")),
 		})
 	}
 	for _, it := range r.Items {
 		rows = append(rows, []InlineKeyboardButton{
-			btn(fmt.Sprintf("#%d  Keep", it.ThoughtID), d(it.ThoughtID, "k")),
+			btn(fmt.Sprintf("#%d  Keep", it.Number), d(it.ThoughtID, "k")),
 			btn("😴 A month", d(it.ThoughtID, "m")),
 			btn("🗑 Drop", d(it.ThoughtID, "d")),
 		})
 	}
 	_, err := b.client.SendMessage(ctx, r.ChatID, formatReview(r), &InlineKeyboardMarkup{InlineKeyboard: rows})
+	if err != nil {
+		b.stopIfBlocked(ctx, r.ChatID, err)
+	}
 	return err
 }
 
@@ -281,6 +307,7 @@ func (b *Bot) reviewAnswer(ctx context.Context, user store.User, reviewID, thoug
 
 var gateReasons = map[string]string{
 	"paused":                 "nudges are paused (/resume turns them on)",
+	"not_set_up":             "I don't know your city yet, so I don't know your timezone. /routine → City sets it",
 	"quiet_hours":            "it is inside your sleep window",
 	"work_hours":             "you are at work and asked not to be nudged there",
 	"work_hours_until_lunch": "you are at work; I only nudge at lunch (13:00–14:00)",
@@ -368,7 +395,11 @@ func (b *Bot) why(ctx context.Context, user store.User) {
 		if lane != "" {
 			lane = "  <i>· " + lane + "</i>"
 		}
-		fmt.Fprintf(&sb, "\n#%d  %s%s\n", s.ThoughtID, Esc(clean(s.Title)), lane)
+		number := s.Number
+		if number == 0 {
+			number = int(s.ThoughtID) // runs logged before per-person numbering
+		}
+		fmt.Fprintf(&sb, "\n#%d  %s%s\n", number, Esc(clean(s.Title)), lane)
 		if s.Held != "" {
 			fmt.Fprintf(&sb, "      ⏸ <i>%s</i>\n", Esc(s.Held))
 		} else {

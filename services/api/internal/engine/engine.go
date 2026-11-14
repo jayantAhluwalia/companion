@@ -47,8 +47,8 @@ type Sender interface {
 }
 
 type Config struct {
-	MonthlyBudgetUSD float64 // model spend above this stops proactive calls
-	ScoutsPerDay     int     // web lookups allowed per day
+	MonthlyBudgetUSD float64 // service-wide model spend above which everything stops; each person also has their own
+	ScoutsPerDay     int     // web lookups allowed per day across everyone
 }
 
 type Engine struct {
@@ -58,7 +58,8 @@ type Engine struct {
 	sender  Sender
 	log     *slog.Logger
 	cfg     Config
-	mu      sync.Mutex // one evaluation at a time in this process
+	mu      sync.Mutex            // guards locks
+	locks   map[int64]*sync.Mutex // one evaluation at a time per person, never across people
 
 	lastTick atomic.Int64            // unix time the ticker last completed, for the health check
 	alert    func(kind, text string) // tells the owner something broke; nil = log only
@@ -76,10 +77,24 @@ func (e *Engine) LastTick() time.Time {
 }
 
 func New(db *store.Store, aiClient *ai.Client, weather *signals.Weather, cfg Config, log *slog.Logger) *Engine {
-	return &Engine{db: db, ai: aiClient, weather: weather, cfg: cfg, log: log}
+	return &Engine{db: db, ai: aiClient, weather: weather, cfg: cfg, log: log, locks: map[int64]*sync.Mutex{}}
 }
 
 func (e *Engine) SetSender(s Sender) { e.sender = s }
+
+// lockUser serialises work for one person. A slow lookup for one user must
+// not hold up anyone else, so there is no engine-wide lock.
+func (e *Engine) lockUser(userID int64) func() {
+	e.mu.Lock()
+	l, ok := e.locks[userID]
+	if !ok {
+		l = &sync.Mutex{}
+		e.locks[userID] = l
+	}
+	e.mu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
 
 type Options struct {
 	Trigger string // ticker | manual | message
@@ -104,13 +119,16 @@ type Result struct {
 }
 
 const (
-	tickEvery        = 30 * time.Minute
-	nudgeTTL         = 24 * time.Hour // unanswered after this counts as ignored
-	modelBackoff     = 3 * time.Hour  // after the model said "none", do not ask again for a while
-	maxCandidates    = 3
-	scoutsPerRun     = 1
-	scoutBudgetShare = 0.8        // lookups stop at 80% of the monthly budget; nudges keep the rest
-	lockKey          = 0x636f6d70 // "comp"
+	tickEvery     = 30 * time.Minute
+	nudgeTTL      = 24 * time.Hour // unanswered after this counts as ignored
+	modelBackoff  = 3 * time.Hour  // after the model said "none", do not ask again for a while
+	maxCandidates = 3
+	scoutsPerRun  = 1
+	// scoutsPerUserPerDay keeps one person from taking every lookup of the
+	// day; Config.ScoutsPerDay is the total across everyone.
+	scoutsPerUserPerDay = 1
+	scoutBudgetShare    = 0.8        // lookups stop at 80% of the monthly budget; nudges keep the rest
+	lockKey             = 0x636f6d70 // "comp"
 )
 
 // Run ticks on the half hour until ctx is cancelled.
@@ -174,8 +192,7 @@ func (e *Engine) tick(ctx context.Context) {
 // Evaluate runs one decision for one user. Every run is logged, including
 // the ones that send nothing, so "why didn't it nudge me?" always has an answer.
 func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Result, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	defer e.lockUser(user.ID)()
 
 	loc, err := time.LoadLocation(user.Timezone)
 	if err != nil {
@@ -259,7 +276,7 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 	}
 
 	// 4. Signals, scores and lanes.
-	lookups := e.scoutBudget(ctx, now)
+	lookups := e.scoutBudget(ctx, user, prefs, now)
 	if !pm.Budgeted {
 		lookups = &scoutBudget{why: "no budgeted nudge can go out right now"} // a paid lookup could not lead to a send
 	}
@@ -299,12 +316,21 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 	// 5. Spend guards before asking the model. Obligations skip them: a
 	// deadline is not something to save two cents on.
 	if !opt.Force && !obligations {
-		if cost, _, err := e.db.MonthlyCostUSD(ctx); err == nil && cost >= e.cfg.MonthlyBudgetUSD {
-			return finish("none", fmt.Sprintf("monthly AI budget reached ($%.2f of $%.2f)", cost, e.cfg.MonthlyBudgetUSD))
+		if cost, _, err := e.db.UserMonthlyCostUSD(ctx, user.ID); err == nil && cost >= prefs.MonthlyBudgetUSD {
+			return finish("none", fmt.Sprintf("this month's AI budget is used ($%.2f of $%.2f)", cost, prefs.MonthlyBudgetUSD))
 		}
 		if last, err := e.db.LastModelPass(ctx, user.ID); err == nil && last != nil && now.Sub(*last) < modelBackoff {
 			return finish("none", "the model passed recently; asking again after "+last.Add(modelBackoff).In(loc).Format("15:04"))
 		}
+	}
+
+	// The breaker for the whole service applies to everyone and everything,
+	// obligations included: it is what stands between a fault and the bill.
+	if cost, _, err := e.db.MonthlyCostUSD(ctx); err == nil && cost >= e.cfg.MonthlyBudgetUSD && !opt.Force {
+		if e.alert != nil {
+			e.alert("budget", fmt.Sprintf("The service-wide AI budget is used up ($%.2f of $%.2f). Nudges are off until next month or until it is raised.", cost, e.cfg.MonthlyBudgetUSD))
+		}
+		return finish("none", "the service-wide AI budget is used up")
 	}
 
 	// 6. The model proposes.
@@ -392,7 +418,7 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 	// dropped or snoozed it in the meantime.
 	if !opt.Force {
 		if fresh, err := e.db.GetThought(ctx, user.ID, t.ID); err != nil || fresh.Status != "active" {
-			return finish("none", fmt.Sprintf("thought #%d changed while I was deciding, so nothing was sent", t.ID))
+			return finish("none", fmt.Sprintf("thought #%d changed while I was deciding, so nothing was sent", t.Number))
 		}
 	}
 	nudgeID, err := e.db.CreateNudge(ctx, store.Nudge{
@@ -499,13 +525,22 @@ func (e *Engine) checkHooks(ctx context.Context, user store.User, p store.Prefs,
 	return out
 }
 
-// scoutBudget works out how many web lookups this run may make.
-func (e *Engine) scoutBudget(ctx context.Context, now time.Time) *scoutBudget {
-	if cost, _, err := e.db.MonthlyCostUSD(ctx); err != nil || cost >= scoutBudgetShare*e.cfg.MonthlyBudgetUSD {
-		return &scoutBudget{why: "monthly lookup budget reached"}
+// scoutBudget works out how many web lookups this run may make. Lookups are
+// the one expensive signal, so they are rationed three ways: by this
+// person's monthly budget, by their own daily count, and by a daily total
+// across everyone.
+func (e *Engine) scoutBudget(ctx context.Context, user store.User, p store.Prefs, now time.Time) *scoutBudget {
+	if cost, _, err := e.db.UserMonthlyCostUSD(ctx, user.ID); err != nil || cost >= scoutBudgetShare*p.MonthlyBudgetUSD {
+		return &scoutBudget{why: "this month's lookup budget is used"}
 	}
-	if n, err := e.db.LLMCallsSince(ctx, "scout", day(now)); err != nil || n >= e.cfg.ScoutsPerDay {
-		return &scoutBudget{why: "daily lookup limit reached"}
+	if cost, _, err := e.db.MonthlyCostUSD(ctx); err != nil || cost >= scoutBudgetShare*e.cfg.MonthlyBudgetUSD {
+		return &scoutBudget{why: "the service-wide lookup budget is used"}
+	}
+	if n, err := e.db.UserCallsSince(ctx, user.ID, "scout", day(now)); err != nil || n >= scoutsPerUserPerDay {
+		return &scoutBudget{why: "today's lookup is used"}
+	}
+	if n, err := e.db.LLMCallsSince(ctx, "scout", now.Add(-24*time.Hour)); err != nil || n >= e.cfg.ScoutsPerDay {
+		return &scoutBudget{why: "the service-wide daily lookup limit is reached"}
 	}
 	return &scoutBudget{left: scoutsPerRun}
 }

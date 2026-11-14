@@ -42,6 +42,25 @@ engine does not know which channel delivers. The weaknesses are around that core
 
 Still open from section 3: splitting `/why` when it runs long (11), and the rest of 15.
 
+## 2b. Stage 1 (friends) — done 14 Nov 2026
+
+Sized for three or four invited testers on Telegram, not for scale.
+
+| Blocker (section 5.1) | What was done |
+|---|---|
+| A. Buttons did not check ownership | One guard at the top of the callback handler. Every action is listed with the ids its data carries; each id is looked up against the person pressing; an unlisted action is refused. An end-to-end test presses seventeen forged buttons as a second person and checks nothing changed. |
+| B. Global limits and `/cost` | Each person has a monthly budget ($4; the owner $8), one web lookup a day and a capture ceiling. `/cost` shows one's own spend; the owner also sees the total. A service-wide breaker ($18) sits above them. |
+| C. Unbounded spend | Out of budget, a capture is saved in the person's words and read later. `/nudge` is limited to five a day. A person who blocks the bot has proactive messages turned off. |
+| D. Indian time by default | No proactive message until a city is set, because the city is where the timezone comes from. The city question says so. |
+| E. Clock changes | Days are counted on calendar dates; the weekly review time is built from the clock time. Tested across a New York spring-forward. |
+| F. One queue | One lock per person in the engine. Telegram updates are still handled in order in one loop, which is fine at this size. |
+| G. Access | Invite links (`/invite`, owner only): single use, seven days. Private chats only. A stranger gets one refusal and nothing is stored. |
+| Numbering | Each person's thoughts are numbered from 1. Internal ids no longer appear in any message. |
+| Privacy | The welcome says, before anything is sent, that the owner can read what is stored and that thoughts go to the model provider. `/export` sends a person everything held about them; `/forget` deletes it after one confirmation. The owner's `/users` shows counts and cost only. |
+
+Not done, by choice at this size: row-level security in the database, a user-scoped store
+handle, concurrent handling per chat, and a shared lookup cache. They belong to stages 2 and 3.
+
 ## 3. Findings that mattered with one user (as reviewed)
 
 Ranked. "Where" is relative to `services/api/internal`.

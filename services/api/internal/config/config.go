@@ -31,8 +31,8 @@ func Load() (Config, error) {
 		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 		DatabaseURL:   os.Getenv("DATABASE_URL"),
 		BotEnabled:    getenv("BOT_ENABLED", "true") != "false",
-		MonthlyBudget: 15,
-		ScoutsPerDay:  2,
+		MonthlyBudget: 18, // across everyone; kept under the $20 cap set in the Anthropic console
+		ScoutsPerDay:  4,  // across everyone; each person gets at most one a day
 		DBSchema:      os.Getenv("DB_SCHEMA"),
 		DrySend:       os.Getenv("DRY_SEND") == "true",
 	}

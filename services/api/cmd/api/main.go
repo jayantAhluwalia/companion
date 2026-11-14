@@ -54,7 +54,7 @@ func main() {
 		tg.Dry = func(method string, payload any) { log.Info("dry send", "method", method, "payload", payload) }
 		log.Warn("DRY_SEND is on: outgoing Telegram messages are logged, not sent")
 	}
-	bot := telegram.NewBot(tg, aiClient, db, eng, weather, cfg.TelegramChatID, log)
+	bot := telegram.NewBot(tg, aiClient, db, eng, weather, cfg.TelegramChatID, cfg.MonthlyBudget, log)
 	eng.SetSender(bot)
 	eng.SetAlert(bot.Alert)
 	go eng.Backfill(ctx)

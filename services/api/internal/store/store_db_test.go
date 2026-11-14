@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,10 +51,21 @@ func TestMain(m *testing.M) {
 
 var nextChat int64 = 1000
 
+// newUser lets a member in the way a real one arrives: by redeeming an
+// invite from the owner.
 func newUser(t *testing.T) User {
 	t.Helper()
+	ctx := t.Context()
+	owner, err := db.EnsureOwner(ctx, 1, "Owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := db.CreateInvite(ctx, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	nextChat++
-	u, err := db.GetOrCreateUser(t.Context(), nextChat, "Test")
+	u, err := db.RedeemInvite(ctx, code, nextChat, "Test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,22 +109,242 @@ func sendNudge(t *testing.T, u User, th Thought, lane, trigger string, ago time.
 	return id
 }
 
-func TestGetOrCreateUserIsIdempotent(t *testing.T) {
-	a, err := db.GetOrCreateUser(t.Context(), 42, "A")
+func TestOwnerIsCreatedOnceAndStaysOwner(t *testing.T) {
+	ctx := t.Context()
+	a, err := db.EnsureOwner(ctx, 1, "Owner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := db.GetOrCreateUser(t.Context(), 42, "A again")
+	b, err := db.EnsureOwner(ctx, 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.ID != b.ID {
-		t.Fatalf("same chat gave two users: %d and %d", a.ID, b.ID)
+	if a.ID != b.ID || !b.IsOwner() {
+		t.Fatalf("the owner chat must map to one owner: %+v then %+v", a, b)
 	}
-	if _, err := db.GetPrefs(t.Context(), a.ID); err != nil {
-		t.Fatalf("a new user should have preferences: %v", err)
+	if _, err := db.GetPrefs(ctx, a.ID); err != nil {
+		t.Fatalf("the owner should have preferences: %v", err)
+	}
+	if _, found, err := db.UserByChat(ctx, 999_999); err != nil || found {
+		t.Fatalf("a chat nobody invited is not a user: found=%v err=%v", found, err)
 	}
 }
+
+func TestInviteLetsExactlyOnePersonIn(t *testing.T) {
+	ctx := t.Context()
+	owner, _ := db.EnsureOwner(ctx, 1, "Owner")
+	code, err := db.CreateInvite(ctx, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	friend, err := db.RedeemInvite(ctx, "  "+code+"  ", 5001, "Friend") // links get pasted with spaces
+	if err != nil {
+		t.Fatal(err)
+	}
+	if friend.IsOwner() || friend.Role != RoleMember {
+		t.Errorf("an invited person is a member, got role %q", friend.Role)
+	}
+	if _, err := db.GetPrefs(ctx, friend.ID); err != nil {
+		t.Errorf("a new member should have preferences: %v", err)
+	}
+	if got, found, _ := db.UserByChat(ctx, 5001); !found || got.ID != friend.ID {
+		t.Error("the member should now be found by their chat")
+	}
+	if _, err := db.RedeemInvite(ctx, code, 5002, "Second"); err != ErrBadInvite {
+		t.Errorf("a used code must not work again, got %v", err)
+	}
+	if _, found, _ := db.UserByChat(ctx, 5002); found {
+		t.Error("a refused invite must not create a user")
+	}
+	if _, err := db.RedeemInvite(ctx, "not-a-code", 5003, "Guess"); err != ErrBadInvite {
+		t.Errorf("a made-up code must be refused, got %v", err)
+	}
+	expired, _ := db.CreateInvite(ctx, owner.ID)
+	if _, err := db.pool.Exec(ctx, `update invites set expires_at = now() - interval '1 hour' where code = $1`, expired); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RedeemInvite(ctx, expired, 5004, "Late"); err != ErrBadInvite {
+		t.Errorf("an expired code must be refused, got %v", err)
+	}
+}
+
+func TestEachPersonNumbersFromOne(t *testing.T) {
+	a, b := newUser(t), newUser(t)
+	ctx := t.Context()
+	a1 := newThought(t, a, "a first", true)
+	b1 := newThought(t, b, "b first", true)
+	a2 := newThought(t, a, "a second", true)
+	if a1.Number != 1 || a2.Number != 2 || b1.Number != 1 {
+		t.Fatalf("numbers: a=%d,%d b=%d; want 1,2 and 1", a1.Number, a2.Number, b1.Number)
+	}
+	got, err := db.GetThoughtByNumber(ctx, b.ID, 1)
+	if err != nil || got.ID != b1.ID {
+		t.Fatalf("b's #1 should be b's thought: %+v %v", got, err)
+	}
+	if _, err := db.GetThoughtByNumber(ctx, b.ID, 2); err != ErrNotFound {
+		t.Errorf("b has no #2 even though a does: %v", err)
+	}
+	// Captures arriving together still get distinct numbers.
+	done := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			_, _, err := db.CreateThought(ctx, a.ID, "burst", "test", 0)
+			done <- err
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		if err := <-done; err != nil {
+			t.Errorf("concurrent capture: %v", err)
+		}
+	}
+	var distinct, total int
+	if err := db.pool.QueryRow(ctx, `select count(distinct number), count(*) from thoughts where user_id = $1`, a.ID).Scan(&distinct, &total); err != nil {
+		t.Fatal(err)
+	}
+	if distinct != total || total != 10 {
+		t.Errorf("a has %d thoughts with %d distinct numbers", total, distinct)
+	}
+}
+
+func TestOwnershipChecks(t *testing.T) {
+	a, b := newUser(t), newUser(t)
+	ctx := t.Context()
+	at, bt := newThought(t, a, "a's", true), newThought(t, b, "b's", true)
+	an := sendNudge(t, a, at, "quick", "ticker", time.Hour)
+	ar, err := db.CreateReview(ctx, a.ID, 1, "scheduled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(name string, got bool, err error, want bool) {
+		t.Helper()
+		if err != nil || got != want {
+			t.Errorf("%s: got %v (err %v), want %v", name, got, err, want)
+		}
+	}
+	ok, err := db.OwnsThought(ctx, a.ID, at.ID)
+	check("a owns a's thought", ok, err, true)
+	ok, err = db.OwnsThought(ctx, b.ID, at.ID)
+	check("b does not own a's thought", ok, err, false)
+	ok, err = db.OwnsNudge(ctx, a.ID, an, at.ID)
+	check("a owns a's nudge", ok, err, true)
+	ok, err = db.OwnsNudge(ctx, b.ID, an, at.ID)
+	check("b does not own a's nudge", ok, err, false)
+	ok, err = db.OwnsNudge(ctx, b.ID, an, bt.ID)
+	check("a's nudge cannot be paired with b's thought", ok, err, false)
+	ok, err = db.OwnsNudge(ctx, a.ID, an, bt.ID)
+	check("nor by a with someone else's thought", ok, err, false)
+	ok, err = db.OwnsReview(ctx, a.ID, ar)
+	check("a owns a's review", ok, err, true)
+	ok, err = db.OwnsReview(ctx, b.ID, ar)
+	check("b does not own a's review", ok, err, false)
+	if _, err := db.GetThought(ctx, b.ID, at.ID); err != ErrNotFound {
+		t.Errorf("b must not be able to read a's thought by id: %v", err)
+	}
+}
+
+func TestCostsAndLimitsArePerPerson(t *testing.T) {
+	a, b := newUser(t), newUser(t)
+	ctx := t.Context()
+	for i := 0; i < 3; i++ {
+		if err := db.LogLLMCall(ctx, LLMCall{UserID: &a.ID, Purpose: "scout", Model: "m", PromptVer: "v", CostUSD: 0.5}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.LogLLMCall(ctx, LLMCall{UserID: &b.ID, Purpose: "interpret", Model: "m", PromptVer: "v", CostUSD: 0.02}); err != nil {
+		t.Fatal(err)
+	}
+	costA, callsA, _ := db.UserMonthlyCostUSD(ctx, a.ID)
+	costB, callsB, _ := db.UserMonthlyCostUSD(ctx, b.ID)
+	if costA != 1.5 || callsA != 3 || costB != 0.02 || callsB != 1 {
+		t.Errorf("a: $%.2f in %d calls, b: $%.2f in %d; want 1.50/3 and 0.02/1", costA, callsA, costB, callsB)
+	}
+	if total, _, _ := db.MonthlyCostUSD(ctx); total < 1.52 {
+		t.Errorf("the service-wide total includes everyone, got $%.2f", total)
+	}
+	since := time.Now().Add(-time.Hour)
+	if n, _ := db.UserCallsSince(ctx, a.ID, "scout", since); n != 3 {
+		t.Errorf("a's lookups today = %d, want 3", n)
+	}
+	if n, _ := db.UserCallsSince(ctx, b.ID, "scout", since); n != 0 {
+		t.Errorf("b has made no lookups, got %d", n)
+	}
+	newThought(t, a, "one", false)
+	if n, _ := db.CapturesSince(ctx, a.ID, since); n != 1 {
+		t.Errorf("a's captures = %d, want 1", n)
+	}
+	if n, _ := db.CapturesSince(ctx, b.ID, since); n != 0 {
+		t.Errorf("b's captures = %d, want 0", n)
+	}
+	p, err := db.GetPrefs(ctx, b.ID)
+	if err != nil || p.MonthlyBudgetUSD != 4 || p.CapturesPerDay != 40 {
+		t.Errorf("a member's default limits: %+v %v", p, err)
+	}
+}
+
+func TestForgetRemovesOnePersonCompletely(t *testing.T) {
+	a, b := newUser(t), newUser(t)
+	ctx := t.Context()
+	at, bt := newThought(t, a, "a's secret", true), newThought(t, b, "b's thought", true)
+	sendNudge(t, a, at, "quick", "ticker", time.Hour)
+	sendNudge(t, b, bt, "quick", "ticker", time.Hour)
+	if _, err := db.CreateReview(ctx, a.ID, 1, "scheduled"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.LogLLMCall(ctx, LLMCall{UserID: &a.ID, ThoughtID: &at.ID, Purpose: "interpret", Model: "m", PromptVer: "v", CostUSD: 0.02}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertSignal(ctx, Signal{ThoughtID: at.ID, HookKey: "k", Kind: "web", State: "waiting", Facts: []byte("{}"), ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+
+	export, err := db.ExportUser(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(export, "a's secret") || contains(export, "b's thought") {
+		t.Errorf("an export holds that person's thoughts and nobody else's: %s", export)
+	}
+
+	if err := db.ForgetUser(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`select count(*) from users where id = $1`,
+		`select count(*) from user_preferences where user_id = $1`,
+		`select count(*) from thoughts where user_id = $1`,
+		`select count(*) from nudges where user_id = $1`,
+		`select count(*) from decision_runs where user_id = $1`,
+		`select count(*) from reviews where user_id = $1`,
+		`select count(*) from llm_calls where user_id = $1`,
+	} {
+		var n int
+		if err := db.pool.QueryRow(ctx, q, a.ID).Scan(&n); err != nil || n != 0 {
+			t.Errorf("%s -> %d rows left (err %v)", q, n, err)
+		}
+	}
+	var orphans int
+	if err := db.pool.QueryRow(ctx, `
+		select (select count(*) from thought_interpretations where thought_id = $1)
+		     + (select count(*) from thought_events where thought_id = $1)
+		     + (select count(*) from signals where thought_id = $1)
+		     + (select count(*) from llm_calls where thought_id = $1)`, at.ID).Scan(&orphans); err != nil || orphans != 0 {
+		t.Errorf("%d rows still refer to the deleted thought (err %v)", orphans, err)
+	}
+	// The cost of the work done for them is still accounted for.
+	var kept int
+	if err := db.pool.QueryRow(ctx, `select count(*) from llm_calls where user_id is null and cost_usd = 0.02`).Scan(&kept); err != nil || kept == 0 {
+		t.Errorf("the cost row should remain without the person attached (err %v)", err)
+	}
+	// And nobody else lost anything.
+	if got, err := db.GetThought(ctx, b.ID, bt.ID); err != nil || got.RawContent != "b's thought" {
+		t.Errorf("b's thought must be untouched: %+v %v", got, err)
+	}
+	if err := db.ForgetUser(ctx, a.ID); err != ErrNotFound {
+		t.Errorf("forgetting twice reports not found, got %v", err)
+	}
+}
+
+func contains(b []byte, sub string) bool { return strings.Contains(string(b), sub) }
 
 func TestSameMessageIsStoredOnce(t *testing.T) {
 	u := newUser(t)

@@ -26,6 +26,7 @@ const (
 // arithmetic behind a decision.
 type Scored struct {
 	ThoughtID int64       `json:"thought_id"`
+	Number    int         `json:"number,omitempty"` // the number its owner sees
 	Title     string      `json:"title"`
 	T         float64     `json:"T"`
 	R         float64     `json:"R"`
@@ -96,7 +97,7 @@ func opportunity(typ ai.ThoughtType, p store.Prefs, now time.Time) float64 {
 
 func score(t store.Thought, st store.Stats, hooks []HookState, p store.Prefs, now time.Time) Scored {
 	s := Scored{
-		ThoughtID: t.ID, Title: t.Interpretation.Title, Hooks: hooks,
+		ThoughtID: t.ID, Number: t.Number, Title: t.Interpretation.Title, Hooks: hooks,
 		T: timeliness(hooks),
 		R: recency(t, now),
 		I: importance(st),

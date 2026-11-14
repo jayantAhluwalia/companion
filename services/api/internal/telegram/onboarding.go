@@ -82,7 +82,7 @@ func (b *Bot) ask(ctx context.Context, user store.User, q string, chain bool) {
 			{btn("Friday evening", d("5@19:30")), btn("Turn it off", d("0@"))},
 		}
 	case "ct":
-		text = "📍  <b>Which city do you live in?</b>\nType its name. I use it for the weather on your days off and for local deals."
+		text = "📍  <b>Which city do you live in?</b>\nType its name. It tells me your timezone, the weather on your days off and what's local.\n<i>If you skip this I can still remember things, but I won't nudge you: I wouldn't know what time it is for you.</i>"
 		rows = [][]InlineKeyboardButton{{btn("Skip", d("skip"))}}
 		_ = b.db.SetPending(ctx, user.ID, &store.Pending{Kind: "city", Chain: chain, ExpiresAt: time.Now().Add(pendingTTL)})
 	default:

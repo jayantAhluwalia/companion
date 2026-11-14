@@ -155,3 +155,21 @@ Stage 0 choices worth remembering:
 - **At-most-once for nudges.** When it is unclear whether a message went out, it is counted as
   sent. A missed nudge is better than a repeated one.
 - **Fading is gone.** A thought never leaves the user's view without their decision.
+
+## 2026-11-14 — Invited testers: a guard at the door, not a rewrite
+
+**Context.** The user wants three or four friends testing, not a product launch.
+
+**Decision.** Ownership is enforced at one chokepoint, the callback handler, by a table that
+names which ids each button carries; commands look thoughts up by the sender's own numbering.
+The fuller design (a store handle scoped to one user, row-level security) waits for stage 2,
+when a second client would otherwise need the same checks written again.
+
+**Also decided.** Invites are single-use links from the owner. Each person has their own budget
+and a required city (for the timezone). People are told at the door that the owner can read
+their thoughts, and can export or delete everything themselves. The owner's view of other people
+is counts and cost, never content.
+
+**Costs.** Worst case is about $4 per friend per month plus the owner's $8, with a service-wide
+stop at $18, set under the $20 cap in the Anthropic console. Raising the number of testers past
+three means raising that cap or lowering the per-person budget.

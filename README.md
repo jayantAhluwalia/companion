@@ -37,5 +37,9 @@ In the bot: `/nudge` asks for the best thing to bring up now, `/why` explains th
 decision and shows the week's budget and today's send window, `/review` runs the weekly review
 now, `/routine` edits sleep, work, days off, city and the review day.
 
+Inviting someone: `/invite` (owner only) gives a single-use link. They are told how their data
+is handled, answer five questions, and from then on have their own thoughts, numbers, budget and
+nudges. `/users` shows who is in, with counts and cost only. Anyone can `/export` or `/forget`.
+
 How the engine decides when to speak is in `docs/02-action-plan.md` (sections 5.5 and 6.9); the
 evidence behind it is in `reports/Nudge timing research evidence.md`.

@@ -46,6 +46,12 @@ func hardGate(now time.Time, p store.Prefs, present bool) string {
 	if !p.NotificationsEnabled {
 		return "paused"
 	}
+	// Without a city there is no timezone, and every rule about sleep, work
+	// and "today" would be evaluated in the wrong one. Stay silent until
+	// the person has said where they are.
+	if !p.HasHome() {
+		return "not_set_up"
+	}
 	if present {
 		return ""
 	}

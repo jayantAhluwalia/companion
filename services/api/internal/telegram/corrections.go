@@ -50,7 +50,7 @@ func (b *Bot) correction(ctx context.Context, user store.User, action string, th
 			return "Couldn't save that."
 		}
 		_ = b.db.Touch(ctx, thoughtID)
-		_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(thoughtID, fixed), nil)
+		_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(t.Number, fixed), nil)
 		return "Fixed."
 
 	case "cn":
@@ -87,7 +87,7 @@ func (b *Bot) handlePending(ctx context.Context, user store.User, p store.Pendin
 			return
 		}
 		_ = b.db.Touch(ctx, p.ThoughtID)
-		b.reply(ctx, chat, formatInterpretation(p.ThoughtID, fixed))
+		b.reply(ctx, chat, formatInterpretation(t.Number, fixed))
 
 	case "clarify":
 		t, err := b.db.GetThought(ctx, user.ID, p.ThoughtID)

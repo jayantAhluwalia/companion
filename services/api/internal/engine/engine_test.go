@@ -11,8 +11,11 @@ import (
 var ist = time.FixedZone("IST", 5*3600+1800)
 
 // A typical routine: sleep 23–07, work 10–19 Mon–Fri, nudges at lunch only.
+var homeLat, homeLon = 28.65, 77.23
+
 func prefs() store.Prefs {
 	return store.Prefs{
+		HomeLat: &homeLat, HomeLon: &homeLon, HomeCity: "Delhi, India", MonthlyBudgetUSD: 4,
 		QuietStart: 23 * 60, QuietEnd: 7 * 60, WorkStart: 10 * 60, WorkEnd: 19 * 60,
 		WorkDays: []int{1, 2, 3, 4, 5}, DaysOff: []int{6, 7}, NudgeDuringWork: "lunch",
 		DailyLimit: 1, MinIntervalMinutes: 240, NotificationsEnabled: true, WeeklyBudget: 5,
@@ -45,6 +48,8 @@ func TestHardGate(t *testing.T) {
 		{name: "chatting late at night is not sleep", now: at(13, 23, 30), present: true, want: ""},
 		{name: "chatting at work is fine", now: at(13, 11, 0), present: true, want: ""},
 		{name: "paused wins even when chatting", now: at(13, 11, 0), present: true, edit: func(p *store.Prefs) { p.NotificationsEnabled = false }, want: "paused"},
+		{name: "no city means no timezone, so nothing proactive", now: at(13, 13, 30), edit: func(p *store.Prefs) { p.HomeLat, p.HomeLon = nil, nil }, want: "not_set_up"},
+		{name: "not even while chatting", now: at(13, 13, 30), present: true, edit: func(p *store.Prefs) { p.HomeLat, p.HomeLon = nil, nil }, want: "not_set_up"},
 	}
 	for _, c := range cases {
 		p := prefs()
@@ -231,9 +236,39 @@ func TestWeatherWaitsUntilTheForecastIsUseful(t *testing.T) {
 		t.Fatalf("want waiting on Monday, got %s (%s)", st.State, st.Summary)
 	}
 	// No location at all is "unknown", which scores as if there were no hook.
-	st = e.weatherState(t.Context(), ai.Hook{Kind: ai.HookWeather}, prefs(), monday)
+	noHome := prefs()
+	noHome.HomeLat, noHome.HomeLon = nil, nil
+	st = e.weatherState(t.Context(), ai.Hook{Kind: ai.HookWeather}, noHome, monday)
 	if st.State != StateUnknown {
 		t.Fatalf("want unknown without a location, got %s", st.State)
+	}
+}
+
+func TestDaysBetweenSurvivesClockChanges(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("no timezone data")
+	}
+	// Clocks spring forward in New York on Sunday 14 March 2027.
+	sat := time.Date(2027, 3, 13, 9, 0, 0, 0, ny)
+	mon := time.Date(2027, 3, 15, 0, 0, 0, 0, ny)
+	if got := daysBetween(sat, mon); got != 2 {
+		t.Errorf("Saturday to Monday across the change is 2 days, got %d", got)
+	}
+	// The old arithmetic was a day short here, which is what this guards.
+	if naive := int(mon.Sub(day(sat)).Hours() / 24); naive != 1 {
+		t.Logf("note: duration arithmetic now gives %d on this date", naive)
+	}
+	deadline := ai.Hook{Kind: ai.HookDate, Date: "2027-03-15", LeadDays: 1}
+	if st := dateState(deadline, sat); st.State != StateWaiting {
+		t.Errorf("two days before a lead-1 deadline is still waiting, got %s (%s)", st.State, st.Summary)
+	}
+	sun := time.Date(2027, 3, 14, 9, 0, 0, 0, ny)
+	if st := dateState(deadline, sun); st.State != StateFired || st.DueIn != 1 {
+		t.Errorf("the day before: want fired, due in 1; got %s due in %d", st.State, st.DueIn)
+	}
+	if got := daysBetween(at(13, 23, 30), at(14, 0, 15)); got != 1 {
+		t.Errorf("45 minutes across midnight is the next day, got %d", got)
 	}
 }
 

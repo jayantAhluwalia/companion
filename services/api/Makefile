@@ -12,8 +12,8 @@ build:
 test:
 	go test ./...
 
-dbtest: ## the store's SQL against a throwaway schema (created and dropped by the test)
-	@set -a; . ./.env; set +a; TEST_DATABASE_URL="$$DATABASE_URL" go test -tags db ./internal/store -count=1
+dbtest: ## the store's SQL and the bot's access rules against throwaway schemas (created and dropped by the tests)
+	@set -a; . ./.env; set +a; TEST_DATABASE_URL="$$DATABASE_URL" go test -tags db ./internal/store ./internal/telegram -count=1
 
 backup: ## export every table to ~/companion-backups and prove the file restores
 	@mkdir -p $(HOME)/companion-backups

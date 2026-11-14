@@ -36,10 +36,10 @@ jobs:
       - name: Formatting
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - name: Vet
-        run: go vet ./... && go vet -tags db ./internal/store
+        run: go vet ./... && go vet -tags db ./internal/store ./internal/telegram
       - name: Unit tests
         run: go test ./...
-      - name: Database tests (every migration from scratch, then the store's SQL)
-        run: go test -tags db ./internal/store -count=1
+      - name: Database tests (every migration from scratch, the store's SQL, and who may touch what)
+        run: go test -tags db ./internal/store ./internal/telegram -count=1
         env:
           TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/companion?sslmode=disable

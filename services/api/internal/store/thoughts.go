@@ -8,12 +8,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"companion/api/internal/ai"
 )
 
 type Thought struct {
 	ID                int64
+	Number            int // the person's own numbering, shown in chat; ID stays internal
 	UserID            int64
 	RawContent        string
 	Status            string
@@ -50,12 +52,23 @@ func (s *Store) CreateThought(ctx context.Context, userID int64, raw, source str
 	if messageID != 0 {
 		mid = &messageID
 	}
-	err = s.pool.QueryRow(ctx, `
-		insert into thoughts (user_id, raw_content, source, source_message_id) values ($1, $2, $3, $4)
-		on conflict (user_id, source_message_id) where source_message_id is not null do nothing
-		returning id, user_id, raw_content, status, created_at, last_touched_at`,
-		userID, raw, source, mid,
-	).Scan(&t.ID, &t.UserID, &t.RawContent, &t.Status, &t.CreatedAt, &t.LastTouchedAt)
+	// The number is the person's next one. Two captures arriving at the same
+	// instant could pick the same number; the unique index rejects the
+	// second and it is tried again.
+	for attempt := 0; ; attempt++ {
+		err = s.pool.QueryRow(ctx, `
+			insert into thoughts (user_id, raw_content, source, source_message_id, number)
+			values ($1, $2, $3, $4, (select coalesce(max(number), 0) + 1 from thoughts where user_id = $1))
+			on conflict (user_id, source_message_id) where source_message_id is not null do nothing
+			returning id, number, user_id, raw_content, status, created_at, last_touched_at`,
+			userID, raw, source, mid,
+		).Scan(&t.ID, &t.Number, &t.UserID, &t.RawContent, &t.Status, &t.CreatedAt, &t.LastTouchedAt)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "thoughts_user_number_idx" && attempt < 5 {
+			continue
+		}
+		break
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return t, false, nil
 	}
@@ -210,7 +223,7 @@ func (s *Store) ClearReminder(ctx context.Context, thoughtID int64) error {
 }
 
 const thoughtSelect = `
-	select t.id, t.user_id, t.raw_content, t.status, t.snoozed_until, t.created_at, t.last_touched_at,
+	select t.id, t.number, t.user_id, t.raw_content, t.status, t.snoozed_until, t.created_at, t.last_touched_at,
 	       t.last_nudged_at, t.nudge_count, t.ignored_streak, t.remind_at, t.interpret_attempts,
 	       i.id, i.version, i.source, coalesce(i.model, ''), coalesce(i.prompt_version, ''), i.created_at,
 	       i.type, i.title, i.description, i.desired_outcome, i.next_steps, i.confidence,
@@ -227,7 +240,7 @@ func scanThought(row pgx.Row) (Thought, error) {
 	var iSteps, iAssumptions, iHooks []byte
 	var iConf *float64
 	var iClar *bool
-	err := row.Scan(&t.ID, &t.UserID, &t.RawContent, &t.Status, &t.SnoozedUntil, &t.CreatedAt, &t.LastTouchedAt,
+	err := row.Scan(&t.ID, &t.Number, &t.UserID, &t.RawContent, &t.Status, &t.SnoozedUntil, &t.CreatedAt, &t.LastTouchedAt,
 		&t.LastNudgedAt, &t.NudgeCount, &t.IgnoredStreak, &t.RemindAt, &t.InterpretAttempts,
 		&iID, &iVersion, &iSource, &iModel, &iPrompt, &iCreated,
 		&iType, &iTitle, &iDesc, &iOutcome, &iSteps, &iConf, &iClar, &iQuestion, &iAssumptions, &iTimeframe, &iHooks, &iUrgency)
@@ -250,6 +263,15 @@ func scanThought(row pgx.Row) (Thought, error) {
 
 func (s *Store) GetThought(ctx context.Context, userID, thoughtID int64) (Thought, error) {
 	t, err := scanThought(s.pool.QueryRow(ctx, thoughtSelect+` where t.id = $1 and t.user_id = $2`, thoughtID, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return t, ErrNotFound
+	}
+	return t, err
+}
+
+// GetThoughtByNumber finds a thought by the number its owner sees.
+func (s *Store) GetThoughtByNumber(ctx context.Context, userID int64, number int) (Thought, error) {
+	t, err := scanThought(s.pool.QueryRow(ctx, thoughtSelect+` where t.number = $1 and t.user_id = $2`, number, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return t, ErrNotFound
 	}

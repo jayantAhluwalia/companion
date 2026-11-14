@@ -507,35 +507,6 @@ func (s *Store) StaleInterpretations(ctx context.Context, staleVersions []string
 	return out, rows.Err()
 }
 
-// GetUser loads a user by id.
-func (s *Store) GetUser(ctx context.Context, userID int64) (User, error) {
-	var u User
-	err := s.pool.QueryRow(ctx, `select id, telegram_chat_id, coalesce(display_name, ''), timezone, created_at from users where id = $1`, userID).
-		Scan(&u.ID, &u.TelegramChatID, &u.DisplayName, &u.Timezone, &u.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return u, ErrNotFound
-	}
-	return u, err
-}
-
-// Users lists every user; the ticker evaluates each in turn.
-func (s *Store) Users(ctx context.Context) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `select id, telegram_chat_id, coalesce(display_name, ''), timezone, created_at from users order by id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []User
-	for rows.Next() {
-		var u User
-		if err := rows.Scan(&u.ID, &u.TelegramChatID, &u.DisplayName, &u.Timezone, &u.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, u)
-	}
-	return out, rows.Err()
-}
-
 // TryLock takes a Postgres advisory lock so two processes (a deploy in
 // flight) never evaluate at once. The lock lives on one pinned connection;
 // call unlock to release both.

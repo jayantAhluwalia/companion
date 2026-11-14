@@ -25,7 +25,7 @@ import (
 // thoughts and thought_interpretations refer to each other, so thoughts are
 // loaded without their "current interpretation" pointer and it is set after.
 var tables = []string{
-	"users", "user_preferences", "thoughts", "thought_interpretations", "decision_runs",
+	"users", "invites", "user_preferences", "thoughts", "thought_interpretations", "decision_runs",
 	"nudges", "thought_events", "llm_calls", "signals", "reviews", "kv",
 }
 
@@ -207,7 +207,7 @@ func restore(ctx context.Context, url, schema, path string) error {
 		// jsonb_populate_record maps the JSON onto the table's own row type,
 		// so this one statement works for every table and every column type.
 		q := fmt.Sprintf(`insert into %q overriding system value select * from jsonb_populate_record(null::%q, $1::jsonb)`, l.Table, l.Table)
-		if l.Table == "kv" || l.Table == "user_preferences" {
+		if l.Table == "kv" || l.Table == "user_preferences" || l.Table == "invites" { // no generated id
 			q = fmt.Sprintf(`insert into %q select * from jsonb_populate_record(null::%q, $1::jsonb)`, l.Table, l.Table)
 		}
 		if _, err := tx.Exec(ctx, q, string(row)); err != nil {

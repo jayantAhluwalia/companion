@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -192,6 +195,67 @@ func (c *Client) EditText(ctx context.Context, chatID, messageID int64, text str
 		payload["reply_markup"] = keyboard
 	}
 	return c.call(ctx, "editMessageText", payload, nil)
+}
+
+// SendDocument uploads a small file to the chat.
+func (c *Client) SendDocument(ctx context.Context, chatID int64, filename string, data []byte, caption string) error {
+	if c.Dry != nil {
+		c.Dry("sendDocument", map[string]any{"chat_id": chatID, "filename": filename, "bytes": len(data)})
+		return nil
+	}
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	_ = w.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+	if caption != "" {
+		_ = w.WriteField("caption", caption)
+	}
+	part, err := w.CreateFormFile("document", filename)
+	if err != nil {
+		return err
+	}
+	if _, err := part.Write(data); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", url.PathEscape(c.token))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram sendDocument: %w", withoutURL(err))
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var env struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		return fmt.Errorf("telegram sendDocument: %s", fallbackText(env.Description, fmt.Sprintf("HTTP %d", resp.StatusCode)))
+	}
+	return nil
+}
+
+func fallbackText(s, alt string) string {
+	if s == "" {
+		return alt
+	}
+	return s
+}
+
+// IsBlocked reports whether an error means the person has blocked the bot
+// or deleted their account, so further messages to them are pointless.
+func IsBlocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "bot was blocked by the user") || strings.Contains(msg, "user is deactivated") || strings.Contains(msg, "chat not found")
 }
 
 func (c *Client) SetMyCommands(ctx context.Context, cmds []BotCommand) error {

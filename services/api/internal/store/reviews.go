@@ -8,6 +8,7 @@ import (
 // ReviewItem is one thought offered in a weekly review.
 type ReviewItem struct {
 	ThoughtID int64
+	Number    int
 	Title     string
 	Type      string
 	AgeDays   int
@@ -18,7 +19,7 @@ type ReviewItem struct {
 // first, so the review surfaces what has drifted furthest.
 func (s *Store) ReviewCandidates(ctx context.Context, userID int64, limit int) ([]ReviewItem, error) {
 	rows, err := s.pool.Query(ctx, `
-		select t.id, i.title, i.type, extract(day from now() - t.created_at)::int
+		select t.id, t.number, i.title, i.type, extract(day from now() - t.created_at)::int
 		  from thoughts t join thought_interpretations i on i.id = t.current_interpretation_id
 		 where t.user_id = $1 and t.status = 'active' and i.type <> 'unclear'
 		   and t.last_touched_at < now() - interval '3 days'
@@ -31,7 +32,7 @@ func (s *Store) ReviewCandidates(ctx context.Context, userID int64, limit int) (
 	var out []ReviewItem
 	for rows.Next() {
 		var it ReviewItem
-		if err := rows.Scan(&it.ThoughtID, &it.Title, &it.Type, &it.AgeDays); err != nil {
+		if err := rows.Scan(&it.ThoughtID, &it.Number, &it.Title, &it.Type, &it.AgeDays); err != nil {
 			return nil, err
 		}
 		out = append(out, it)
@@ -44,7 +45,7 @@ func (s *Store) ReviewCandidates(ctx context.Context, userID int64, limit int) (
 // app learns what happened after the tap.
 func (s *Store) ReviewCheckIns(ctx context.Context, userID int64, limit int) ([]ReviewItem, error) {
 	rows, err := s.pool.Query(ctx, `
-		select t.id, i.title, i.type, extract(day from now() - t.created_at)::int
+		select t.id, t.number, i.title, i.type, extract(day from now() - t.created_at)::int
 		  from thoughts t join thought_interpretations i on i.id = t.current_interpretation_id
 		 where t.user_id = $1 and t.status = 'active'
 		   and exists (select 1 from nudges n where n.thought_id = t.id and n.response_action in ('do_it', 'next_steps')
@@ -59,7 +60,7 @@ func (s *Store) ReviewCheckIns(ctx context.Context, userID int64, limit int) ([]
 	var out []ReviewItem
 	for rows.Next() {
 		var it ReviewItem
-		if err := rows.Scan(&it.ThoughtID, &it.Title, &it.Type, &it.AgeDays); err != nil {
+		if err := rows.Scan(&it.ThoughtID, &it.Number, &it.Title, &it.Type, &it.AgeDays); err != nil {
 			return nil, err
 		}
 		out = append(out, it)

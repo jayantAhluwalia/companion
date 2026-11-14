@@ -50,6 +50,8 @@ type Prefs struct {
 	WeeklyBudget         int // nudges per 7 days, deadlines and requested reminders excluded
 	ReviewDay            int // ISO weekday of the weekly review; 0 = off
 	ReviewTime           Clock
+	MonthlyBudgetUSD     float64 // this person\'s model spend limit for the month
+	CapturesPerDay       int
 }
 
 func (p Prefs) HasHome() bool { return p.HomeLat != nil && p.HomeLon != nil }
@@ -103,11 +105,11 @@ func (s *Store) GetPrefs(ctx context.Context, userID int64) (Prefs, error) {
 		       to_char(work_start, 'HH24:MI'), to_char(work_end, 'HH24:MI'),
 		       work_days, days_off, nudge_during_work, daily_limit, min_interval_minutes,
 		       notifications_enabled, onboarded_at, home_city, home_country, home_lat, home_lon,
-		       weekly_budget, coalesce(review_dow, 0), to_char(review_time, 'HH24:MI')
+		       weekly_budget, coalesce(review_dow, 0), to_char(review_time, 'HH24:MI'), monthly_budget_usd::float8, captures_per_day
 		  from user_preferences where user_id = $1`, userID,
 	).Scan(&qs, &qe, &ws, &we, &workDays, &daysOff, &p.NudgeDuringWork, &p.DailyLimit, &p.MinIntervalMinutes,
 		&p.NotificationsEnabled, &p.OnboardedAt, &city, &country, &p.HomeLat, &p.HomeLon,
-		&p.WeeklyBudget, &p.ReviewDay, &rt)
+		&p.WeeklyBudget, &p.ReviewDay, &rt, &p.MonthlyBudgetUSD, &p.CapturesPerDay)
 	if err != nil {
 		return p, err
 	}

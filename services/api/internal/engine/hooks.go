@@ -88,6 +88,18 @@ func timeliness(states []HookState) float64 {
 	return best
 }
 
+// daysBetween counts calendar days from one date to another, whatever the
+// clocks did in between. Dividing a duration by 24 hours is a day short
+// across a spring-forward change, which would put a deadline reminder on
+// the wrong day for anyone living where clocks change.
+func daysBetween(from, to time.Time) int {
+	fy, fm, fd := from.Date()
+	ty, tm, td := to.Date()
+	a := time.Date(fy, fm, fd, 0, 0, 0, 0, time.UTC)
+	b := time.Date(ty, tm, td, 0, 0, 0, 0, time.UTC)
+	return int(b.Sub(a).Hours() / 24)
+}
+
 func day(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
 }
@@ -219,7 +231,7 @@ func dateState(h ai.Hook, now time.Time) HookState {
 		st.State, st.Summary = StateUnknown, "unreadable date"
 		return st
 	}
-	until := int(d.Sub(day(now)).Hours() / 24)
+	until := daysBetween(now, d)
 	// The lead is the interpreter's judgement of how far ahead a reminder
 	// helps. Zero is a real answer: "the parcel arrives on the 16th" needs
 	// no heads-up the day before, only a word on the day.

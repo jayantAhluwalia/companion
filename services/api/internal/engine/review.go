@@ -25,7 +25,9 @@ func reviewDue(now time.Time, p store.Prefs, last []store.Review) string {
 	if isoWeekday(now) != p.ReviewDay {
 		return "not the review day"
 	}
-	start := day(now).Add(time.Duration(p.ReviewTime) * time.Minute)
+	// Built from the clock time, not by adding minutes to midnight, so it is
+	// still 19:00 on a day when the clocks change.
+	start := time.Date(now.Year(), now.Month(), now.Day(), int(p.ReviewTime)/60, int(p.ReviewTime)%60, 0, 0, now.Location())
 	if now.Before(start) || !now.Before(start.Add(reviewOpenFor)) {
 		return "not the review time"
 	}
@@ -44,8 +46,7 @@ func reviewDue(now time.Time, p store.Prefs, last []store.Review) string {
 // user asked for it with /review. It reports whether one was sent and, if
 // not, why.
 func (e *Engine) Review(ctx context.Context, user store.User, onRequest bool) (bool, string, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	defer e.lockUser(user.ID)()
 	if e.sender == nil {
 		return false, "no delivery channel configured", nil
 	}

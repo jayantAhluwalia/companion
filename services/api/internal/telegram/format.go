@@ -59,11 +59,12 @@ func typePlural(t ai.ThoughtType) string {
 
 func clean(s string) string { return strings.TrimRight(strings.TrimSpace(s), ".") }
 
-// formatInterpretation renders the reply to a captured thought.
-func formatInterpretation(thoughtID int64, i ai.Interpretation) string {
+// formatInterpretation renders the reply to a captured thought. number is
+// the one the person sees; internal ids never appear in a message.
+func formatInterpretation(number int, i ai.Interpretation) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s  <b>%s</b>\n", typeIcon(i.Type), Esc(i.Title))
-	fmt.Fprintf(&sb, "<i>%s · %.0f%% sure · #%d</i>\n", typeLabel(i.Type), i.Confidence*100, thoughtID)
+	fmt.Fprintf(&sb, "<i>%s · %.0f%% sure · #%d</i>\n", typeLabel(i.Type), i.Confidence*100, number)
 	if i.Urgency == ai.UrgencyNow {
 		sb.WriteString("⚡ <i>Sounds urgent, so I won't wait long to bring it up</i>\n")
 	}
@@ -191,7 +192,7 @@ func formatReview(r engine.ReviewMessage) string {
 	if len(r.CheckIns) > 0 {
 		sb.WriteString("\n<b>You said let's do it. Did these get done?</b>\n")
 		for _, it := range r.CheckIns {
-			fmt.Fprintf(&sb, "#%d  %s  %s\n", it.ThoughtID, typeIcon(ai.ThoughtType(it.Type)), Esc(clean(it.Title)))
+			fmt.Fprintf(&sb, "#%d  %s  %s\n", it.Number, typeIcon(ai.ThoughtType(it.Type)), Esc(clean(it.Title)))
 		}
 	}
 	if len(r.Items) > 0 {
@@ -201,7 +202,7 @@ func formatReview(r engine.ReviewMessage) string {
 			if it.AgeDays >= 7 {
 				age = fmt.Sprintf("  <i>%d days</i>", it.AgeDays)
 			}
-			fmt.Fprintf(&sb, "#%d  %s  %s%s\n", it.ThoughtID, typeIcon(ai.ThoughtType(it.Type)), Esc(clean(it.Title)), age)
+			fmt.Fprintf(&sb, "#%d  %s  %s%s\n", it.Number, typeIcon(ai.ThoughtType(it.Type)), Esc(clean(it.Title)), age)
 		}
 	}
 	sb.WriteString("\n<i>Keep leaves it be. Dropping one is fine: it means the list stays yours.</i>")
@@ -238,7 +239,7 @@ func formatList(ts []store.Thought, loc *time.Location) string {
 			if r := []rune(title); len(r) > listTitleMax {
 				title = string(r[:listTitleMax]) + "…"
 			}
-			line := fmt.Sprintf("      #%d  %s", t.ID, Esc(clean(title)))
+			line := fmt.Sprintf("      #%d  %s", t.Number, Esc(clean(title)))
 			if t.Status == "snoozed" && t.SnoozedUntil != nil {
 				line += fmt.Sprintf("  <i>😴 until %s</i>", t.SnoozedUntil.In(loc).Format("2 Jan"))
 			}
