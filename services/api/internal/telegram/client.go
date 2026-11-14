@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -90,7 +91,7 @@ func (c *Client) call(ctx context.Context, method string, payload any, out any) 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("telegram %s: %w", method, err)
+		return fmt.Errorf("telegram %s: %w", method, withoutURL(err))
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
@@ -110,6 +111,18 @@ func (c *Client) call(ctx context.Context, method string, payload any, out any) 
 		return json.Unmarshal(env.Result, out)
 	}
 	return nil
+}
+
+// withoutURL strips the request URL from a transport error. The bot token is
+// part of that URL, and Go prints the whole URL in such errors, so without
+// this a network failure would write the token into logs, the database and
+// any message that shows an error reason.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
+	}
+	return err
 }
 
 func (c *Client) GetMe(ctx context.Context) (User, error) {

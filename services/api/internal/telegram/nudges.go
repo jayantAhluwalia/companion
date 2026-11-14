@@ -252,10 +252,13 @@ func (b *Bot) reviewAnswer(ctx context.Context, user store.User, reviewID, thoug
 
 	// Take the answered row away and leave the others.
 	if m != nil && m.ReplyMarkup != nil {
-		marker := fmt.Sprintf(":%d:", thoughtID)
+		// Match the whole "rv:<review>:<thought>:" prefix. Matching the
+		// thought number alone would also hit the review number, and
+		// answering thought #3 in review #3 would clear every row.
+		prefix := fmt.Sprintf("rv:%d:%d:", reviewID, thoughtID)
 		var rest [][]InlineKeyboardButton
 		for _, row := range m.ReplyMarkup.InlineKeyboard {
-			if len(row) > 0 && strings.Contains(row[0].CallbackData, marker) && strings.HasPrefix(row[0].CallbackData, "rv:") {
+			if len(row) > 0 && strings.HasPrefix(row[0].CallbackData, prefix) {
 				continue
 			}
 			rest = append(rest, row)
