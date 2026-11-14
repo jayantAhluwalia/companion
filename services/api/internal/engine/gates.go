@@ -67,6 +67,21 @@ func Gate(now time.Time, p store.Prefs, sentToday int, lastSent *time.Time) stri
 	return ""
 }
 
+// criticalExtra is how many nudges beyond the daily limit a deadline may
+// claim. A reminder with no outside reason must never be able to block one
+// with a date on it (14 Nov review: a beard-oil check-in at 09:00 used the
+// day's slot and held back "service the motorcycle tomorrow morning").
+const criticalExtra = 1
+
+// criticalOnly reports whether the day's ordinary nudge is used but a
+// deadline may still go out. The interval between nudges still applies.
+func criticalOnly(gateReason string, now time.Time, p store.Prefs, sentToday int, lastSent *time.Time) bool {
+	if gateReason != "daily_cap" || sentToday >= p.DailyLimit+criticalExtra {
+		return false
+	}
+	return lastSent == nil || now.Sub(*lastSent) >= time.Duration(p.MinIntervalMinutes)*time.Minute
+}
+
 // cooldownDays is how long a thought rests after a nudge: three days,
 // doubling for every nudge in a row that went unanswered, capped at 30.
 func cooldownDays(ignoredStreak int) int {

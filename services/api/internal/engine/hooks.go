@@ -31,6 +31,19 @@ type HookState struct {
 	Facts    any         `json:"facts,omitempty"`
 	Footnote string      `json:"footnote,omitempty"` // short line shown under a nudge
 	Links    []ai.Source `json:"links,omitempty"`
+	// Critical marks a deadline that is today or tomorrow. A critical nudge
+	// may go out even when the day's ordinary nudge has been used.
+	Critical bool `json:"critical,omitempty"`
+}
+
+// critical reports whether any hook of a scored thought is date-critical.
+func (s Scored) critical() bool {
+	for _, h := range s.Hooks {
+		if h.Critical {
+			return true
+		}
+	}
+	return false
 }
 
 // strength maps a state to the timeliness value T. A thought with a hook
@@ -213,6 +226,7 @@ func dateState(h ai.Hook, now time.Time) HookState {
 		st.State, st.Summary = StateUnknown, fmt.Sprintf("the date %s has passed", d.Format("Mon 2 Jan"))
 	case until <= lead:
 		st.State = StateFired
+		st.Critical = until <= 1
 		st.Summary = fmt.Sprintf("%s is %s", d.Format("Mon 2 Jan"), inDays(until))
 		st.Footnote = fmt.Sprintf("%s is %s", d.Format("Mon 2 Jan"), inDays(until))
 	default:

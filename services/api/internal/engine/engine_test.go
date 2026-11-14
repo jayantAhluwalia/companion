@@ -115,6 +115,34 @@ func TestDateState(t *testing.T) {
 	}
 }
 
+func TestCriticalLane(t *testing.T) {
+	now := at(14, 15, 0) // Saturday afternoon
+	p := prefs()
+	morning := at(14, 9, 0)
+	justNow := at(14, 13, 0)
+	if !criticalOnly("daily_cap", now, p, 1, &morning) {
+		t.Error("with the day's nudge used six hours ago, a deadline may still go")
+	}
+	if criticalOnly("daily_cap", now, p, 2, &morning) {
+		t.Error("only one extra nudge a day")
+	}
+	if criticalOnly("daily_cap", now, p, 1, &justNow) {
+		t.Error("the interval between nudges still applies")
+	}
+	if criticalOnly("quiet_hours", now, p, 1, &morning) || criticalOnly("work_hours", now, p, 1, &morning) {
+		t.Error("a deadline never overrides sleep or work")
+	}
+	// Tomorrow is critical; three days out has fired but can wait its turn.
+	tomorrow := dateState(ai.Hook{Kind: ai.HookDate, Date: "2026-11-15", LeadDays: 1}, now)
+	later := dateState(ai.Hook{Kind: ai.HookDate, Date: "2026-11-17", LeadDays: 5}, now)
+	if !tomorrow.Critical || later.Critical || later.State != StateFired {
+		t.Errorf("tomorrow critical=%v, in-three-days critical=%v state=%s", tomorrow.Critical, later.Critical, later.State)
+	}
+	if !(Scored{Hooks: []HookState{later, tomorrow}}).critical() || (Scored{Hooks: []HookState{later}}).critical() {
+		t.Error("a thought is critical when any of its hooks is")
+	}
+}
+
 func TestFreeTimeState(t *testing.T) {
 	p := prefs()
 	h := ai.Hook{Kind: ai.HookFreeTime, Minutes: 90}

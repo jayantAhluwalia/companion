@@ -162,13 +162,17 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 	}
 
 	// 1. Gates: is now an acceptable moment at all?
+	deadlinesOnly := false
 	if !opt.Force {
 		sentToday, lastSent, err := e.db.NudgeStats(ctx, user.ID, day(now))
 		if err != nil {
 			return finish("error", "could not read nudge history: "+err.Error())
 		}
 		if reason := Gate(now, prefs, sentToday, lastSent); reason != "" {
-			return finish("blocked", reason)
+			if !criticalOnly(reason, now, prefs, sentToday, lastSent) {
+				return finish("blocked", reason)
+			}
+			deadlinesOnly = true // the day's nudge is used; only a deadline may still go
 		}
 	}
 
@@ -191,6 +195,9 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 
 	// 3. Signals and scores.
 	budget := e.scoutBudget(ctx, now)
+	if deadlinesOnly {
+		budget = &scoutBudget{why: "today's nudge is already sent"} // no paid lookups for a pass that can only send deadlines
+	}
 	byID := map[int64]store.Thought{}
 	var eligible []Scored
 	for _, t := range thoughts {
@@ -208,6 +215,19 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 		}
 		eligible = append(eligible, sc)
 		res.Scores = append(res.Scores, sc)
+	}
+	if deadlinesOnly {
+		var due []Scored
+		for _, sc := range eligible {
+			if sc.critical() {
+				due = append(due, sc)
+			}
+		}
+		if len(due) == 0 {
+			res.Scores = nil
+			return finish("blocked", "daily_cap")
+		}
+		eligible = due
 	}
 	sort.SliceStable(res.Scores, func(i, j int) bool { return res.Scores[i].Score > res.Scores[j].Score })
 	sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].Score > eligible[j].Score })
