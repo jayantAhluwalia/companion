@@ -60,9 +60,10 @@ func TestLiveFixtures(t *testing.T) {
 		Hooks      []string `json:"hooks"`       // kinds that must be present
 		NoHooks    bool     `json:"no_hooks"`    // true = must have none
 		NotThought bool     `json:"not_thought"` // true = talk aimed at the bot, to be set aside
+		Urgency    string   `json:"urgency"`     // when set, the expected urgency
 	}
 	today := time.Now()
-	var total, typeOK, hookOK, keepOK int
+	var total, typeOK, hookOK, keepOK, urgencyOK, urgencyN int
 	var cost float64
 	sc := bufio.NewScanner(file)
 	for sc.Scan() {
@@ -92,6 +93,14 @@ func TestLiveFixtures(t *testing.T) {
 		} else {
 			t.Errorf("KEEP  %q: not_a_thought = %v, want %v", f.Thought, got.NotAThought, f.NotThought)
 		}
+		if f.Urgency != "" {
+			urgencyN++
+			if got.Urgency == f.Urgency {
+				urgencyOK++
+			} else {
+				t.Logf("URGENCY %q: want %s, got %s", f.Thought, f.Urgency, got.Urgency)
+			}
+		}
 		if string(got.Type) == f.Type {
 			typeOK++
 		} else {
@@ -111,7 +120,11 @@ func TestLiveFixtures(t *testing.T) {
 			t.Logf("HOOKS %q: want %v (none=%v), got %s", f.Thought, f.Hooks, f.NoHooks, raw)
 		}
 	}
-	t.Logf("types %d/%d, hooks %d/%d, thought-or-chatter %d/%d, cost $%.3f", typeOK, total, hookOK, total, keepOK, total, cost)
+	t.Logf("types %d/%d, hooks %d/%d, thought-or-chatter %d/%d, urgency %d/%d, cost $%.3f",
+		typeOK, total, hookOK, total, keepOK, total, urgencyOK, urgencyN, cost)
+	if urgencyOK < urgencyN-1 {
+		t.Errorf("urgency %d/%d: more than one miss", urgencyOK, urgencyN)
+	}
 	// Classification of spontaneous thoughts is fuzzy at the edges; the bar
 	// is a regression alarm, not a demand for perfection.
 	if float64(typeOK) < 0.85*float64(total) {

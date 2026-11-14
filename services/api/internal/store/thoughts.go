@@ -23,6 +23,7 @@ type Thought struct {
 	LastNudgedAt   *time.Time
 	NudgeCount     int
 	IgnoredStreak  int
+	RemindAt       *time.Time      // set when the user said when to bring it back
 	Interpretation *Interpretation // current version, nil until interpreted
 }
 
@@ -78,13 +79,13 @@ func (s *Store) AddInterpretation(ctx context.Context, thoughtID int64, source s
 		insert into thought_interpretations
 		  (thought_id, version, source, type, title, description, desired_outcome, next_steps,
 		   confidence, clarification_needed, clarification_question, assumptions, model, prompt_version,
-		   timeframe, hooks)
+		   timeframe, hooks, urgency)
 		values ($1, (select coalesce(max(version), 0) + 1 from thought_interpretations where thought_id = $1),
-		        $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, nullif($12, ''), nullif($13, ''), $14, $15)
+		        $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, nullif($12, ''), nullif($13, ''), $14, $15, $16)
 		returning id, version, created_at`,
 		thoughtID, source, string(in.Type), in.Title, in.Description, in.DesiredOutcome, steps,
 		in.Confidence, in.ClarificationNeeded, in.ClarificationQuestion, assumptions, model, promptVersion,
-		in.Timeframe, hooks,
+		in.Timeframe, hooks, in.Urgency,
 	).Scan(&out.ID, &out.Version, &out.CreatedAt)
 	if err != nil {
 		return out, err
@@ -131,12 +132,27 @@ func (s *Store) SetStatus(ctx context.Context, thoughtID int64, status string, s
 	return s.AddEvent(ctx, thoughtID, nil, "status_"+status, payload)
 }
 
+// SnoozeWithReminder parks a thought until the given time and asks the
+// engine to bring it back then: the user chose the moment themselves.
+func (s *Store) SnoozeWithReminder(ctx context.Context, thoughtID int64, until time.Time) error {
+	if err := s.SetStatus(ctx, thoughtID, "snoozed", &until); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `update thoughts set remind_at = $2 where id = $1`, thoughtID, until)
+	return err
+}
+
+func (s *Store) ClearReminder(ctx context.Context, thoughtID int64) error {
+	_, err := s.pool.Exec(ctx, `update thoughts set remind_at = null where id = $1`, thoughtID)
+	return err
+}
+
 const thoughtSelect = `
 	select t.id, t.user_id, t.raw_content, t.status, t.snoozed_until, t.created_at, t.last_touched_at,
-	       t.last_nudged_at, t.nudge_count, t.ignored_streak,
+	       t.last_nudged_at, t.nudge_count, t.ignored_streak, t.remind_at,
 	       i.id, i.version, i.source, coalesce(i.model, ''), coalesce(i.prompt_version, ''), i.created_at,
 	       i.type, i.title, i.description, i.desired_outcome, i.next_steps, i.confidence,
-	       i.clarification_needed, i.clarification_question, i.assumptions, i.timeframe, i.hooks
+	       i.clarification_needed, i.clarification_question, i.assumptions, i.timeframe, i.hooks, i.urgency
 	  from thoughts t
 	  left join thought_interpretations i on i.id = t.current_interpretation_id`
 
@@ -144,15 +160,15 @@ func scanThought(row pgx.Row) (Thought, error) {
 	var t Thought
 	var iID *int64
 	var iVersion *int
-	var iSource, iModel, iPrompt, iType, iTitle, iDesc, iOutcome, iQuestion, iTimeframe *string
+	var iSource, iModel, iPrompt, iType, iTitle, iDesc, iOutcome, iQuestion, iTimeframe, iUrgency *string
 	var iCreated *time.Time
 	var iSteps, iAssumptions, iHooks []byte
 	var iConf *float64
 	var iClar *bool
 	err := row.Scan(&t.ID, &t.UserID, &t.RawContent, &t.Status, &t.SnoozedUntil, &t.CreatedAt, &t.LastTouchedAt,
-		&t.LastNudgedAt, &t.NudgeCount, &t.IgnoredStreak,
+		&t.LastNudgedAt, &t.NudgeCount, &t.IgnoredStreak, &t.RemindAt,
 		&iID, &iVersion, &iSource, &iModel, &iPrompt, &iCreated,
-		&iType, &iTitle, &iDesc, &iOutcome, &iSteps, &iConf, &iClar, &iQuestion, &iAssumptions, &iTimeframe, &iHooks)
+		&iType, &iTitle, &iDesc, &iOutcome, &iSteps, &iConf, &iClar, &iQuestion, &iAssumptions, &iTimeframe, &iHooks, &iUrgency)
 	if err != nil {
 		return t, err
 	}
@@ -164,7 +180,7 @@ func scanThought(row pgx.Row) (Thought, error) {
 		_ = json.Unmarshal(iSteps, &in.NextSteps)
 		_ = json.Unmarshal(iAssumptions, &in.Assumptions)
 		_ = json.Unmarshal(iHooks, &in.Hooks)
-		in.Timeframe = *iTimeframe
+		in.Timeframe, in.Urgency = *iTimeframe, *iUrgency
 		t.Interpretation = &in
 	}
 	return t, nil

@@ -240,37 +240,31 @@ Implementation notes for Go + Anthropic SDK:
 - Put the static system prompt first and the per-run data last so prompt caching applies.
 - Log every call to `llm_calls` with `usage` tokens.
 
-### 5.5 Evaluator (one run) — as built 13 Nov 2026
+### 5.5 Evaluator (one run) — as running since 14 Nov 2026
 
-The original sketch scored thoughts on age and type only. The built engine adds **hooks**
-(Section 6.8): each thought carries the outside-world conditions that make it timely, and
-the engine checks them against real data before scoring. Code: `services/api/internal/engine`.
+Code: `services/api/internal/engine`. Section 6.9 explains the strategy; this is the order of
+operations. The first version (13 Nov) had one daily cap and sent at the first allowed minute.
 
 ```
-run(trigger):                                  -- ticker every 30 min, /nudge, or the admin endpoint
-  acquire pg advisory lock (skip if held)
-  expire nudges unanswered for 24 h            -- each is an "ignore": cooldown doubles, 4 in a row fades
-  wake snoozed thoughts whose time is up
-  GATES (skipped when the user asked with /nudge):
-    paused | sleep window ± 30 min | at work and asked not to be nudged
-    | at work, lunch-only, and not 13:00–14:00 | daily cap | minimum interval
-    -> record(blocked, reason); return
-  candidates = active, interpreted, not unclear
-  for each: held if on cooldown (3 days × 2^ignored_streak, cap 30)
-            check its hooks -> states (fired | mixed | waiting | negative | unknown)
-            held if touched < 48 h ago and no hook fired
-            score = 0.35T + 0.20R + 0.15I + 0.15A + 0.10O + 0.05F     (Section 6.4)
-  shortlist = top 3 with score ≥ 0.50          -- none: record(none); return, no model call
-  spend guards: monthly budget; 3 h back-off after the model last said "none"
-  decision = llm.decide(shortlist with signal facts, routine, now)    -- decide_v1
-  validate: thought must be on the shortlist, message non-empty and ≤ 500 chars
-  nudge = insert nudges(status=scheduled); send through the Sender interface
-  on success: status=sent, thought.last_nudged_at=now, nudge_count+1
-  record(nudged, decision.reason)              -- every run is logged with all components
+run(trigger):                                  -- ticker every 30 min, /nudge, admin endpoint,
+                                               -- or 90 s after the user stops messaging ("present")
+  weekly review due?  send it and stop          -- one message per tick
+  expire nudges unanswered for 24 h; wake snoozed thoughts
+  HARD GATE: paused | sleep window ± 30 min | work-hours rule   (sleep/work skipped when present)
+  PERMIT:  obligations  = fewer than 2 today and an hour since the last message
+           budgeted     = none sent today, weekly budget left, 4 h since the last message,
+                          and now is inside today's chosen window (window skipped when present)
+  if neither: record(blocked, reason); return
+  for each active thought: check hooks -> score -> lane -> hold reason
+  shortlist: ready obligations alone; otherwise opportunities, then quick actions; top 3
+  if empty: record(none or blocked); return     -- no model call
+  spend guards (skipped for obligations): monthly budget; 3 h back-off after a model "none"
+  decision = llm.decide(shortlist, lane, signals that fired, recent wording)   -- decide_v3
+  validate; record nudge with lane and window; send; record(nudged, reason)
 ```
 
-`/why` in the bot reads the latest run back: outcome, reason, and each thought's score
-components and hook states. `POST /v1/admin/evaluate?dry=1` decides without sending.
+`/why` shows the permit, this week's budget, today's window, the per-window record and each
+thought's lane with the reason it is held. `POST /v1/admin/evaluate?dry=1` decides without sending.
 
 ### 5.6 Notification pipeline (mobile)
 
@@ -360,6 +354,45 @@ Web lookups are the only expensive signal, so they are rationed: one per run, tw
 Not built yet: public holidays and long weekends, calendar free/busy, price tracking for a
 specific product, and the "receptive moment" trigger (evaluate when the user messages).
 
+### 6.9 Nudge strategy: lanes, one budget, windows, review (14 Nov 2026)
+
+Rule: **push only what can be acted on now; review the rest on a rhythm.** Built after the first
+two live nudges and a literature review (`reports/Nudge timing research evidence.md`). The
+review's main findings: what a nudge is about and how easy it makes the action matter more than
+the clock time; fewer is better; early morning is the one consistently bad slot; a person's own
+response history is the best predictor; and no study supports any specific frequency number.
+
+| Lane | What is in it | When it goes | Limit |
+|---|---|---|---|
+| requested | The user tapped "Later" and picked a time | At that time | Obligation: outside the budget |
+| deadline | A date trigger due today or tomorrow | Heads-up in the day-before window (only if the trigger's lead is ≥ 1), then on the day | Obligation; two reminders per deadline, one a day |
+| opportunity | Weather, a web finding or a date coming into range fired | Today's window | Budgeted |
+| quick | An errand with a step of 15 min or less, an urgent errand, or free time for something that needs it | Today's window, after a two-day rest unless urgent | Budgeted; at most 3 a week |
+| review | Everything else: ideas, someday plans, anything unanswered twice | Never pushed alone | The weekly review |
+
+- **Budget.** Budgeted nudges and the weekly review share one budget: 5 per 7 days, 1 per day.
+  Obligations are capped separately at 2 a day. Two unanswered budgeted nudges in a row halve
+  the budget, four cut it to 1; any response restores it. The numbers are judgement, not evidence.
+- **Windows.** Workday: lunch (13:00–14:00) and evening (30 min after work until 90 min before
+  sleep). Free day: late morning (from 10:00, or two hours after waking), afternoon, evening.
+  Nothing before work. One window is chosen per day by Thompson sampling over each window's
+  acted/ignored record, with a prior worth four observations and a 25% random share so no window
+  is abandoned. With a few nudges a week, expect about three months before the record means much.
+- **Present.** Ninety seconds after the user stops messaging the bot, the engine runs once with
+  sleep, work and window rules off: they are already looking at the chat.
+- **Later.** "Later" asks when: in a few hours, tomorrow morning, next day off, next week. The
+  answer becomes a requested reminder and is logged as evidence of when this user can act.
+- **Urgency.** `interpret_v4` reads urgency (now / soon / whenever) from the person's words;
+  "now" skips the two-day rest and is shown with a one-tap "No rush" correction.
+- **Weekly review.** Default Sunday 19:00, changeable or off in `/routine`; `/review` on demand.
+  Up to five thoughts with no attention lately (keep / a month / drop) and up to three "you said
+  let's do it, did it get done?" check-ins. Two reviews with no taps make it monthly.
+- **What is logged per nudge:** lane, window, button, time to press, and completion via `/done`
+  or the review check-in. Judge windows quarterly; change one thing at a time.
+
+Not built: making "Let's do it" land on a prepared action (order link, drafted message);
+public holidays; a user-facing setting for the weekly budget.
+
 ### 6.7 Resolved open questions (from Section 22)
 | Question | Default |
 |---|---|
@@ -406,7 +439,7 @@ a 30-thought fixture test (`make live`): 28/30 types and 30/30 hook kinds on 13 
 
 Still open from this phase: a weekly database backup, and the exit test of 20+ real thoughts.
 
-### Phase 2 — Decision engine and nudges — BUILT 13 Nov 2026, on trial
+### Phase 2 — Decision engine and nudges — BUILT 13 Nov 2026, strategy revised 14 Nov, on trial
 Goal: the agent brings relevant thoughts back, and you can explain every decision it made.
 
 Built: gates, cooldowns, hooks and signals (6.8), scoring with stored components (6.4),

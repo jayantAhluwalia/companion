@@ -34,6 +34,7 @@ type Scored struct {
 	O         float64     `json:"O"`
 	F         float64     `json:"F"`
 	Score     float64     `json:"score"`
+	Lane      string      `json:"lane,omitempty"`
 	Held      string      `json:"held,omitempty"` // why it was not eligible this time
 	Hooks     []HookState `json:"hooks,omitempty"`
 }

@@ -27,11 +27,22 @@ type Outgoing struct {
 	Step      string
 	Footnote  string
 	Links     []ai.Source
+	Lane      string
 }
 
-// Sender delivers a nudge and returns the channel's message id.
+// ReviewMessage is the weekly review, ready for delivery.
+type ReviewMessage struct {
+	ChatID   int64
+	ReviewID int64
+	Week     store.WeekSummary
+	Items    []store.ReviewItem // thoughts that have had no attention lately
+	CheckIns []store.ReviewItem // "you said let's do it; did it get done?"
+}
+
+// Sender delivers to the user and returns the channel's message id.
 type Sender interface {
 	SendNudge(ctx context.Context, n Outgoing) (string, error)
+	SendReview(ctx context.Context, r ReviewMessage) error
 }
 
 type Config struct {
@@ -57,8 +68,11 @@ func (e *Engine) SetSender(s Sender) { e.sender = s }
 
 type Options struct {
 	Trigger string // ticker | manual | message
-	Force   bool   // skip gates, cooldowns and the threshold: the user asked for a nudge
+	Force   bool   // skip every rule: the user asked for a nudge with /nudge
 	DryRun  bool   // decide, log, but do not send
+	// Present means the user has just been messaging the app. Sleep, work
+	// and window rules do not apply; the caps and the budget still do.
+	Present bool
 }
 
 type Result struct {
@@ -66,8 +80,11 @@ type Result struct {
 	Outcome   string   `json:"outcome"` // nudged | none | blocked | dry_run | error
 	Reason    string   `json:"reason"`
 	ThoughtID int64    `json:"thought_id,omitempty"`
+	Lane      string   `json:"lane,omitempty"`
+	Window    string   `json:"window,omitempty"`
 	Message   string   `json:"message,omitempty"`
 	Step      string   `json:"suggested_step,omitempty"`
+	Permit    *Permit  `json:"permit,omitempty"`
 	Scores    []Scored `json:"scores,omitempty"`
 }
 
@@ -114,6 +131,17 @@ func (e *Engine) tick(ctx context.Context) {
 	}
 	for _, u := range users {
 		tctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+		// The weekly review, when due, is this tick's message: nothing else
+		// is stacked on top of it.
+		if sent, why, err := e.Review(tctx, u, false); err != nil {
+			e.log.Error("review", "err", err, "user", u.ID)
+		} else if sent {
+			e.log.Info("review sent", "user", u.ID)
+			cancel()
+			continue
+		} else if why != "" {
+			e.log.Debug("review not sent", "user", u.ID, "why", why)
+		}
 		res, err := e.Evaluate(tctx, u, Options{Trigger: "ticker"})
 		cancel()
 		if err != nil {
@@ -161,22 +189,30 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 		e.log.Warn("wake snoozed", "err", err)
 	}
 
-	// 1. Gates: is now an acceptable moment at all?
-	deadlinesOnly := false
+	// 1. Hard gates: may the app message this person at all right now?
+	ws := Windows(now, prefs)
+	pm := Permit{Obligation: true, Budgeted: true, Quick: true, Window: currentWindow(ws, now)}
 	if !opt.Force {
-		sentToday, lastSent, err := e.db.NudgeStats(ctx, user.ID, day(now))
+		if reason := hardGate(now, prefs, opt.Present); reason != "" {
+			return finish("blocked", reason)
+		}
+		// 2. What may go out: obligations, budgeted nudges, both or neither.
+		load, err := e.db.NudgeLoad(ctx, user.ID, day(now), now)
 		if err != nil {
 			return finish("error", "could not read nudge history: "+err.Error())
 		}
-		if reason := Gate(now, prefs, sentToday, lastSent); reason != "" {
-			if !criticalOnly(reason, now, prefs, sentToday, lastSent) {
-				return finish("blocked", reason)
-			}
-			deadlinesOnly = true // the day's nudge is used; only a deadline may still go
+		tallies, err := e.db.WindowTallies(ctx, user.ID, day(now))
+		if err != nil {
+			e.log.Warn("window tallies", "err", err)
+		}
+		pm = permit(now, prefs, load, currentWindow(ws, now), chooseWindow(ws, tallies, daySeed(user.ID, now)), opt.Present)
+		res.Permit = &pm
+		if !pm.Obligation && !pm.Budgeted {
+			return finish("blocked", pm.Reason)
 		}
 	}
 
-	// 2. Candidates.
+	// 3. Candidates.
 	thoughts, err := e.db.Candidates(ctx, user.ID)
 	if err != nil {
 		return finish("error", "could not load thoughts: "+err.Error())
@@ -192,62 +228,50 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 	if err != nil {
 		return finish("error", "could not load thought stats: "+err.Error())
 	}
-
-	// 3. Signals and scores.
-	budget := e.scoutBudget(ctx, now)
-	if deadlinesOnly {
-		budget = &scoutBudget{why: "today's nudge is already sent"} // no paid lookups for a pass that can only send deadlines
+	touches, err := e.db.DeadlineTouches(ctx, user.ID)
+	if err != nil {
+		return finish("error", "could not load deadline history: "+err.Error())
 	}
+
+	// 4. Signals, scores and lanes.
+	lookups := e.scoutBudget(ctx, now)
+	if !pm.Budgeted {
+		lookups = &scoutBudget{why: "no budgeted nudge can go out right now"} // a paid lookup could not lead to a send
+	}
+	none := &scoutBudget{why: "resting after a recent nudge"}
 	byID := map[int64]store.Thought{}
 	var eligible []Scored
 	for _, t := range thoughts {
 		byID[t.ID] = t
-		if hold := onCooldown(t, now); hold != "" && !opt.Force {
-			res.Scores = append(res.Scores, Scored{ThoughtID: t.ID, Title: t.Interpretation.Title, Held: hold})
-			continue
+		b := lookups
+		if onCooldown(t, now) != "" && !opt.Force {
+			b = none
 		}
-		hooks := e.checkHooks(ctx, user, prefs, t, now, budget)
+		hooks := e.checkHooks(ctx, user, prefs, t, now, b)
 		sc := score(t, stats[t.ID], hooks, prefs, now)
-		if hold := tooFresh(t, hooks, now); hold != "" && !opt.Force {
-			sc.Held = hold
-			res.Scores = append(res.Scores, sc)
-			continue
+		sc.Lane = laneOf(t, sc, now)
+		if !opt.Force {
+			sc.Held = holdReason(t, sc, touches[t.ID], pm, ws, now)
 		}
-		eligible = append(eligible, sc)
 		res.Scores = append(res.Scores, sc)
-	}
-	if deadlinesOnly {
-		var due []Scored
-		for _, sc := range eligible {
-			if sc.critical() {
-				due = append(due, sc)
-			}
+		if sc.Held == "" {
+			eligible = append(eligible, sc)
 		}
-		if len(due) == 0 {
-			res.Scores = nil
-			return finish("blocked", "daily_cap")
-		}
-		eligible = due
 	}
 	sort.SliceStable(res.Scores, func(i, j int) bool { return res.Scores[i].Score > res.Scores[j].Score })
-	sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].Score > eligible[j].Score })
-	if len(eligible) == 0 {
-		return finish("none", "every thought is resting: recently captured, or recently nudged")
-	}
 
-	var short []Scored
-	for _, sc := range eligible {
-		if (sc.Score >= Threshold || opt.Force) && len(short) < maxCandidates {
-			short = append(short, sc)
-		}
-	}
+	short, obligations := shortlist(eligible, opt.Force)
 	if len(short) == 0 {
-		best := eligible[0]
-		return finish("none", fmt.Sprintf("nothing is timely enough yet (best: #%d at %.2f, bar is %.2f)", best.ThoughtID, best.Score, Threshold))
+		if !pm.Budgeted {
+			res.Scores = nil // an ordinary blocked tick; keep the log light
+			return finish("blocked", pm.Reason)
+		}
+		return finish("none", "nothing can be acted on right now; the rest waits for its trigger or the weekly review")
 	}
 
-	// 4. Spend guards before asking the model.
-	if !opt.Force {
+	// 5. Spend guards before asking the model. Obligations skip them: a
+	// deadline is not something to save two cents on.
+	if !opt.Force && !obligations {
 		if cost, _, err := e.db.MonthlyCostUSD(ctx); err == nil && cost >= e.cfg.MonthlyBudgetUSD {
 			return finish("none", fmt.Sprintf("monthly AI budget reached ($%.2f of $%.2f)", cost, e.cfg.MonthlyBudgetUSD))
 		}
@@ -256,18 +280,25 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 		}
 	}
 
-	// 5. The model proposes.
+	// 6. The model proposes.
+	recent, err := e.db.RecentNudgeMessages(ctx, user.ID, 3)
+	if err != nil {
+		recent = []string{}
+	}
 	in := ai.DecideInput{
-		Now:     now.Format("Monday 2 January 2006, 15:04"),
-		Routine: describeRoutine(prefs),
-		Home:    prefs.HomeCity,
-		Forced:  opt.Force,
+		Now:          now.Format("Monday 2 January 2006, 15:04"),
+		Routine:      describeRoutine(prefs),
+		Home:         prefs.HomeCity,
+		Forced:       opt.Force || obligations,
+		Piggyback:    opt.Present,
+		RecentNudges: recent,
 	}
 	for _, sc := range short {
 		t := byID[sc.ThoughtID]
 		st := stats[t.ID]
 		c := ai.DecideCandidate{
-			ThoughtID: t.ID, OriginalWords: t.RawContent, Type: t.Interpretation.Type, Title: t.Interpretation.Title,
+			ThoughtID: t.ID, Lane: sc.Lane, Urgency: t.Interpretation.Urgency,
+			OriginalWords: t.RawContent, Type: t.Interpretation.Type, Title: t.Interpretation.Title,
 			Description: t.Interpretation.Description, DesiredOutcome: t.Interpretation.DesiredOutcome,
 			Timeframe: t.Interpretation.Timeframe, NextSteps: t.Interpretation.NextSteps,
 			AgeDays: int(now.Sub(t.CreatedAt).Hours() / 24), NudgesSent: t.NudgeCount, IgnoredInARow: t.IgnoredStreak,
@@ -305,40 +336,51 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 		return finish("none", "model: "+decision.Reason)
 	}
 
-	// 6. The backend disposes.
+	// 7. The backend disposes.
 	t := byID[decision.ThoughtID]
+	var chosen Scored
+	for _, sc := range short {
+		if sc.ThoughtID == t.ID {
+			chosen = sc
+		}
+	}
+	window := pm.Window
+	if opt.Present {
+		window = WindowChat
+	}
 	res.ThoughtID, res.Message, res.Step = t.ID, decision.Message, decision.SuggestedStep
+	res.Lane, res.Window = chosen.Lane, window
 	if opt.DryRun {
 		return finish("dry_run", decision.Reason)
 	}
 	if e.sender == nil {
 		return finish("error", "no delivery channel configured")
 	}
+	lane := chosen.Lane
+	if lane == LaneReview || lane == "" {
+		lane = LaneQuick // only reachable with /nudge, which may pick anything
+	}
 	nudgeID, err := e.db.CreateNudge(ctx, store.Nudge{
 		UserID: user.ID, ThoughtID: t.ID, DecisionRunID: runID, NudgeType: decision.NudgeType,
 		Message: decision.Message, SuggestedStep: decision.SuggestedStep, Channel: "telegram",
+		Lane: lane, Window: window,
 	})
 	if err != nil {
 		return finish("error", "could not record the nudge: "+err.Error())
 	}
 	out := Outgoing{
 		ChatID: user.TelegramChatID, ThoughtID: t.ID, NudgeID: nudgeID, Type: t.Interpretation.Type,
-		Title: t.Interpretation.Title, Message: decision.Message, Step: decision.SuggestedStep,
+		Title: t.Interpretation.Title, Message: decision.Message, Step: decision.SuggestedStep, Lane: lane,
 	}
-	for _, sc := range short {
-		if sc.ThoughtID != t.ID {
+	for _, h := range chosen.Hooks {
+		// Only facts that fired (or half-fired) are shown as the reason.
+		if h.State != StateFired && h.State != StateMixed {
 			continue
 		}
-		for _, h := range sc.Hooks {
-			// Only facts that fired (or half-fired) are shown as the reason.
-			if h.State != StateFired && h.State != StateMixed {
-				continue
-			}
-			if out.Footnote == "" {
-				out.Footnote = h.Footnote
-			}
-			out.Links = append(out.Links, h.Links...)
+		if out.Footnote == "" {
+			out.Footnote = h.Footnote
 		}
+		out.Links = append(out.Links, h.Links...)
 	}
 	msgID, err := e.sender.SendNudge(ctx, out)
 	if err != nil {
@@ -348,7 +390,51 @@ func (e *Engine) Evaluate(ctx context.Context, user store.User, opt Options) (Re
 	if err := e.db.MarkNudgeSent(ctx, nudgeID, t.ID, msgID); err != nil {
 		e.log.Error("mark nudge sent", "err", err, "nudge", nudgeID)
 	}
+	if t.RemindAt != nil {
+		_ = e.db.ClearReminder(ctx, t.ID) // the requested reminder has been delivered
+	}
 	return finish("nudged", decision.Reason)
+}
+
+// shortlist picks what the model is shown, at most maxCandidates. When any
+// obligation is ready, only obligations are shown: a deadline never competes
+// with an errand. Otherwise opportunities come before quick reminders, and
+// within a lane the higher score wins.
+func shortlist(eligible []Scored, force bool) (short []Scored, obligations bool) {
+	rank := func(lane string) int {
+		switch lane {
+		case LaneRequested:
+			return 0
+		case LaneDeadline:
+			return 1
+		case LaneOpportunity:
+			return 2
+		default:
+			return 3
+		}
+	}
+	sorted := append([]Scored(nil), eligible...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if !force && rank(sorted[i].Lane) != rank(sorted[j].Lane) {
+			return rank(sorted[i].Lane) < rank(sorted[j].Lane)
+		}
+		return sorted[i].Score > sorted[j].Score
+	})
+	if len(sorted) > 0 && !force && isObligation(sorted[0].Lane) {
+		obligations = true
+	}
+	for _, sc := range sorted {
+		if len(short) == maxCandidates {
+			break
+		}
+		if !force {
+			if obligations != isObligation(sc.Lane) || sc.Lane == LaneReview {
+				continue
+			}
+		}
+		short = append(short, sc)
+	}
+	return short, obligations
 }
 
 func (e *Engine) checkHooks(ctx context.Context, user store.User, p store.Prefs, t store.Thought, now time.Time, budget *scoutBudget) []HookState {

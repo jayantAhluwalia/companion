@@ -11,10 +11,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/v2"
 )
 
-//go:embed prompts/interpret_v3.md
+//go:embed prompts/interpret_v4.md
 var interpretPrompt string
 
-const InterpretPromptVersion = "interpret_v3"
+const InterpretPromptVersion = "interpret_v4"
 
 // PromptVersionsWithoutHooks are the versions whose stored readings need a
 // re-read to gain hooks. Later versions only refine; they do not trigger one.
@@ -40,6 +40,12 @@ type NextStep struct {
 	Label            string `json:"label"`
 	EstimatedMinutes int    `json:"estimated_minutes"`
 }
+
+const (
+	UrgencyNow      = "now"
+	UrgencySoon     = "soon"
+	UrgencyWhenever = "whenever"
+)
 
 // Hook kinds: what in the outside world makes a thought timely.
 const (
@@ -88,6 +94,10 @@ type Interpretation struct {
 	Assumptions           []string    `json:"assumptions"`
 	Timeframe             string      `json:"timeframe"`
 	Hooks                 []Hook      `json:"hooks"`
+	// Urgency is how soon the person seems to need this, from their own
+	// words: "now" (ran out, due within a day or two, blocking something),
+	// "soon" (this week or so) or "whenever".
+	Urgency string `json:"urgency"`
 	// NotAThought is true when the message was talk aimed at the bot (a
 	// greeting, thanks, a question) rather than something to remember. It is
 	// acted on at capture and not stored.
@@ -134,6 +144,7 @@ var interpretSchema = object(map[string]any{
 	"clarification_question": str(),
 	"assumptions":            array(str()),
 	"timeframe":              str(),
+	"urgency":                enum(UrgencyNow, UrgencySoon, UrgencyWhenever),
 	"not_a_thought":          map[string]any{"type": "boolean"},
 	"hooks": array(object(map[string]any{
 		"kind":     enum(HookWeather, HookWeb, HookDate, HookFreeTime),
@@ -203,6 +214,9 @@ func validate(i *Interpretation, today time.Time) error {
 	// Product rule 6.1: low confidence is treated as unclear so it is never nudged.
 	if i.Confidence < 0.5 && i.Type != TypeUnclear {
 		i.Type = TypeUnclear
+	}
+	if i.Urgency != UrgencyNow && i.Urgency != UrgencySoon {
+		i.Urgency = UrgencyWhenever
 	}
 	i.Hooks = cleanHooks(i.Hooks, today)
 	return nil

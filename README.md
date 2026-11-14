@@ -17,7 +17,7 @@ make run
 
 ```bash
 make test                      # unit tests, free
-make live                      # 30-thought fixture test + one web lookup against the real API (~$0.65)
+make live                      # 39-thought fixture test + one web lookup against the real API (~$0.85)
 make sql Q="select id, status from thoughts"    # read-only query, no psql needed
 make deploy
 ```
@@ -30,4 +30,8 @@ curl -X POST -H "Authorization: Bearer $API_TOKEN" "https://thought-companion-ap
 ```
 
 In the bot: `/nudge` asks for the best thing to bring up now, `/why` explains the last
-decision, `/routine` edits sleep, work, days off and city.
+decision and shows the week's budget and today's send window, `/review` runs the weekly review
+now, `/routine` edits sleep, work, days off, city and the review day.
+
+How the engine decides when to speak is in `docs/02-action-plan.md` (sections 5.5 and 6.9); the
+evidence behind it is in `reports/Nudge timing research evidence.md`.

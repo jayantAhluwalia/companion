@@ -112,3 +112,30 @@ oil on Sat 09:00. Reading the decision log behind them showed two defects, fixed
 Open after the review, for the user to decide: whether a date-critical nudge may exceed the
 daily cap of one; whether "ran out of" style thoughts should skip the two-day rest; a buffer
 after work ends.
+
+## 2026-11-14 — Lanes, one weekly budget, send windows and a weekly review
+
+**Context.** "One nudge a day" was a single budget for everything: it let a no-reason reminder
+block a deadline, and it still allowed a nudge every day whether or not anything had changed.
+The user liked a lanes proposal but asked for the research first. The literature review
+(`reports/Nudge timing research evidence.md`, notes in `research_notes/`) supported the kinds of
+nudge and contradicted two details of the proposal: separate caps per lane added up to more
+messages than before, and a "before work" window sat in the slot the evidence rates worst.
+
+**Decision.** As described in the action plan, section 6.9: obligations (deadlines, times the
+user picked) outside the budget; opportunities and quick actions inside one weekly budget of
+five; one send window a day, learned from this user's own responses, with no early morning;
+everything else in a weekly review. The user's own test for a good nudge, "it came when I could
+act on it", is the success measure: acted versus ignored, per window.
+
+**Consequences.** Expect fewer nudges than under the daily cap, and silent days. Ideas and
+someday plans are no longer pushed on a timer; they wait for a trigger or the review. The
+budget of five, the quick share of three, the back-off steps and the prior are judgement calls
+to revisit with data. Nothing here has been validated on this user yet beyond unit tests, the
+fixture test and dry runs.
+
+## 2026-11-14 — A date trigger's lead time is the interpreter's call
+
+"The luggage arrives on the 16th" would have produced a deadline reminder the evening before
+and another on the day. A lead of zero now means only on the day; a lead of one or more earns
+the day-before heads-up.

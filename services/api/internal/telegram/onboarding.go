@@ -75,6 +75,12 @@ func (b *Bot) ask(ctx context.Context, user store.User, q string, chain bool) {
 			{btn("Fri & Sat", d("5,6")), btn("Sun & Mon", d("7,1"))},
 			{btn("Skip", d("skip"))},
 		}
+	case "rv":
+		text = "🗓  <b>When should the weekly review arrive?</b>\nOne message with everything I'm holding that has gone quiet, so you can keep or drop each."
+		rows = [][]InlineKeyboardButton{
+			{btn("Sunday evening", d("7@19:00")), btn("Saturday morning", d("6@10:30"))},
+			{btn("Friday evening", d("5@19:30")), btn("Turn it off", d("0@"))},
+		}
 	case "ct":
 		text = "📍  <b>Which city do you live in?</b>\nType its name. I use it for the weather on your days off and for local deals."
 		rows = [][]InlineKeyboardButton{{btn("Skip", d("skip"))}}
@@ -118,6 +124,20 @@ func (b *Bot) onboardingAnswer(ctx context.Context, user store.User, chain bool,
 	case q == "wk":
 		err = b.db.SetWork(ctx, user.ID, store.Unset, store.Unset)
 		record = questionLabel(q) + ": <b>no fixed hours</b>"
+	case q == "rv":
+		dayText, timeText, _ := strings.Cut(value, "@")
+		day, _ := strconv.Atoi(dayText)
+		at := store.Unset
+		if h, m, ok := strings.Cut(timeText, ":"); ok {
+			hh, _ := strconv.Atoi(h)
+			mm, _ := strconv.Atoi(m)
+			at = store.Clock(hh*60 + mm)
+		}
+		err = b.db.SetReview(ctx, user.ID, day, at)
+		record = questionLabel(q) + ": <b>off</b>"
+		if day != 0 {
+			record = fmt.Sprintf("%s: <b>%s %s</b>", questionLabel(q), engine.DayList([]int{day}), at)
+		}
 	case q == "dw":
 		err = b.db.SetNudgeDuringWork(ctx, user.ID, value)
 		record = questionLabel(q) + ": <b>" + map[string]string{"yes": "yes", "lunch": "only at lunch", "no": "no, after work"}[value] + "</b>"
@@ -135,7 +155,7 @@ func (b *Bot) onboardingAnswer(ctx context.Context, user store.User, chain bool,
 		b.log.Error("save routine", "err", err, "question", q)
 		return "Couldn't save that."
 	}
-	_ = b.client.EditText(ctx, chat, msgID, record)
+	_ = b.client.EditText(ctx, chat, msgID, record, nil)
 	b.next(ctx, user, q, chain, value)
 	return "Saved."
 }
@@ -222,7 +242,7 @@ func (b *Bot) onboardingTyped(ctx context.Context, user store.User, p store.Pend
 
 func questionLabel(q string) string {
 	return map[string]string{
-		"sl": "🌙  Sleep", "wk": "💼  Work", "dw": "🔔  Nudges during work", "of": "🏖  Days off", "ct": "📍  City",
+		"sl": "🌙  Sleep", "wk": "💼  Work", "dw": "🔔  Nudges during work", "of": "🏖  Days off", "ct": "📍  City", "rv": "🗓  Weekly review",
 	}[q]
 }
 
@@ -236,7 +256,7 @@ func (b *Bot) routine(ctx context.Context, user store.User) {
 	}
 	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
 		{btn("🌙 Sleep", "rt:sl"), btn("💼 Work", "rt:wk"), btn("🔔 At work", "rt:dw")},
-		{btn("🏖 Days off", "rt:of"), btn("📍 City", "rt:ct")},
+		{btn("🏖 Days off", "rt:of"), btn("📍 City", "rt:ct"), btn("🗓 Review", "rt:rv")},
 	}}
 	if _, err := b.client.SendMessage(ctx, user.TelegramChatID, formatRoutine(p), kb); err != nil {
 		b.log.Error("send routine", "err", err)

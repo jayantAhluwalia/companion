@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -28,10 +29,14 @@ type Bot struct {
 	weather     *signals.Weather
 	log         *slog.Logger
 	allowedChat int64 // 0 = not locked yet; the bot then only tells callers their id
+
+	mu       sync.Mutex
+	followOn map[int64]*time.Timer // per user: a pending "while you're here" check
 }
 
 func NewBot(client *Client, aiClient *ai.Client, db *store.Store, eng *engine.Engine, weather *signals.Weather, allowedChat int64, log *slog.Logger) *Bot {
-	return &Bot{client: client, ai: aiClient, db: db, eng: eng, weather: weather, log: log, allowedChat: allowedChat}
+	return &Bot{client: client, ai: aiClient, db: db, eng: eng, weather: weather, log: log, allowedChat: allowedChat,
+		followOn: map[int64]*time.Timer{}}
 }
 
 // AllowedChat is the chat the bot will proactively message (nudges).
@@ -49,7 +54,8 @@ func (b *Bot) Run(ctx context.Context) {
 		{Command: "list", Description: "Your active thoughts"},
 		{Command: "nudge", Description: "Pick the best thing to bring up right now"},
 		{Command: "why", Description: "Why I did or didn't nudge you"},
-		{Command: "routine", Description: "Sleep, work hours, days off, city"},
+		{Command: "review", Description: "Go through what I'm holding, now"},
+		{Command: "routine", Description: "Sleep, work hours, days off, city, review day"},
 		{Command: "done", Description: "/done 12 — mark thought 12 done"},
 		{Command: "snooze", Description: "/snooze 12 7 — quiet for 7 days (default 3)"},
 		{Command: "drop", Description: "/drop 12 — no longer relevant"},
@@ -141,6 +147,8 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message) {
 		b.why(ctx, user)
 	case cmd == "/routine":
 		b.routine(ctx, user)
+	case cmd == "/review":
+		b.reviewNow(ctx, user)
 	case cmd == "/pause" || cmd == "/resume":
 		on := cmd == "/resume"
 		if err := b.db.SetNotifications(ctx, user.ID, on); err != nil {
@@ -189,6 +197,34 @@ func (b *Bot) captureThought(ctx context.Context, user store.User, raw string) {
 	}
 	b.reply(ctx, user.TelegramChatID, "✍️  Got it.")
 	go b.interpret(user, t.ID, raw, "")
+	b.scheduleFollowOn(user)
+}
+
+// followOnDelay is how long the chat must be quiet before the bot adds
+// something of its own. Long enough for the interpretation to arrive and
+// for a second thought to be typed; the research on interruptions says to
+// speak after an exchange ends, not in the middle of it.
+const followOnDelay = 90 * time.Second
+
+// scheduleFollowOn arranges one engine pass shortly after the user stops
+// typing. They are already looking at the chat, so a nudge now costs no
+// interruption. Each new message pushes the moment back.
+func (b *Bot) scheduleFollowOn(user store.User) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if t, ok := b.followOn[user.ID]; ok {
+		t.Stop()
+	}
+	b.followOn[user.ID] = time.AfterFunc(followOnDelay, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		defer cancel()
+		res, err := b.eng.Evaluate(ctx, user, engine.Options{Trigger: "message", Present: true})
+		if err != nil {
+			b.log.Error("follow-on evaluate", "err", err)
+			return
+		}
+		b.log.Info("follow-on", "user", user.ID, "outcome", res.Outcome, "reason", res.Reason, "thought", res.ThoughtID)
+	})
 }
 
 // interpret reads a thought (optionally with the user's clarification),
@@ -271,12 +307,22 @@ func isChatter(text string) bool {
 	return words == "" || chatter[words]
 }
 
-func (b *Bot) sendInterpretation(ctx context.Context, chat int64, thoughtID int64, i ai.Interpretation) {
-	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{{
+// interpretationKeyboard is the row under a fresh reading. An urgent reading
+// gets a second row, because urgency changes how soon the thought comes
+// back and the person should be able to correct it with one tap.
+func interpretationKeyboard(thoughtID int64, i ai.Interpretation) *InlineKeyboardMarkup {
+	rows := [][]InlineKeyboardButton{{
 		{Text: "👍 Looks right", CallbackData: fmt.Sprintf("ok:%d", thoughtID)},
 		{Text: "✏️ Not quite", CallbackData: fmt.Sprintf("wrong:%d", thoughtID)},
-	}}}
-	if _, err := b.client.SendMessage(ctx, chat, formatInterpretation(thoughtID, i), kb); err != nil {
+	}}
+	if i.Urgency == ai.UrgencyNow {
+		rows = append(rows, []InlineKeyboardButton{{Text: "🕰 No rush on this", CallbackData: fmt.Sprintf("nr:%d", thoughtID)}})
+	}
+	return &InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func (b *Bot) sendInterpretation(ctx context.Context, chat int64, thoughtID int64, i ai.Interpretation) {
+	if _, err := b.client.SendMessage(ctx, chat, formatInterpretation(thoughtID, i), interpretationKeyboard(thoughtID, i)); err != nil {
 		b.log.Error("send interpretation", "err", err)
 	}
 }
@@ -375,16 +421,36 @@ func (b *Bot) handleCallback(ctx context.Context, q *CallbackQuery) {
 		toast = "Couldn't find it."
 		if t, err := b.db.GetThought(ctx, user.ID, id); err == nil && t.Interpretation != nil {
 			if err := b.db.SetStatus(ctx, id, "active", nil); err == nil {
-				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(id, t.Interpretation.Interpretation))
+				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(id, t.Interpretation.Interpretation), nil)
 				toast = "Kept."
 			}
 		}
 	case "wrong", "ct", "cn", "cx":
 		toast = b.correction(ctx, user, action, id, parts[2], msgID)
-	case "do_it", "next_steps", "later", "not_interested":
+	case "nr":
+		toast = "Couldn't find it."
+		if t, err := b.db.GetThought(ctx, user.ID, id); err == nil && t.Interpretation != nil {
+			calm := t.Interpretation.Interpretation
+			calm.Urgency = ai.UrgencyWhenever
+			if _, err := b.db.AddInterpretation(ctx, id, "user", calm, "", ""); err == nil {
+				_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(id, calm), interpretationKeyboard(id, calm))
+				toast = "Okay, no rush."
+			}
+		}
+	case "do_it", "next_steps", "not_interested":
 		nudgeID, _ := strconv.ParseInt(parts[2], 10, 64)
 		toast = b.nudgeResponse(ctx, user, action, id, nudgeID)
 		_ = b.client.ClearKeyboard(ctx, chat, msgID)
+	case "later":
+		nudgeID, _ := strconv.ParseInt(parts[2], 10, 64)
+		toast = b.nudgeResponse(ctx, user, action, id, nudgeID)
+		_ = b.client.EditKeyboard(ctx, chat, msgID, laterKeyboard(id))
+	case "lt":
+		toast = b.laterChoice(ctx, user, id, parts[2])
+		_ = b.client.ClearKeyboard(ctx, chat, msgID)
+	case "rv":
+		thoughtID, _ := strconv.ParseInt(parts[2], 10, 64)
+		toast = b.reviewAnswer(ctx, user, id, thoughtID, parts[3], q.Message)
 	case "ob":
 		toast = b.onboardingAnswer(ctx, user, parts[1] == "c", parts[2], parts[3], msgID)
 	case "rt":

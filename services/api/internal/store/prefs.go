@@ -47,6 +47,9 @@ type Prefs struct {
 	HomeCity             string
 	HomeCountry          string
 	HomeLat, HomeLon     *float64
+	WeeklyBudget         int // nudges per 7 days, deadlines and requested reminders excluded
+	ReviewDay            int // ISO weekday of the weekly review; 0 = off
+	ReviewTime           Clock
 }
 
 func (p Prefs) HasHome() bool { return p.HomeLat != nil && p.HomeLon != nil }
@@ -92,20 +95,23 @@ func clockArg(c Clock) *string {
 
 func (s *Store) GetPrefs(ctx context.Context, userID int64) (Prefs, error) {
 	var p Prefs
-	var qs, qe, ws, we *string
+	var qs, qe, ws, we, rt *string
 	var workDays, daysOff []int32
 	var city, country *string
 	err := s.pool.QueryRow(ctx, `
 		select to_char(quiet_start, 'HH24:MI'), to_char(quiet_end, 'HH24:MI'),
 		       to_char(work_start, 'HH24:MI'), to_char(work_end, 'HH24:MI'),
 		       work_days, days_off, nudge_during_work, daily_limit, min_interval_minutes,
-		       notifications_enabled, onboarded_at, home_city, home_country, home_lat, home_lon
+		       notifications_enabled, onboarded_at, home_city, home_country, home_lat, home_lon,
+		       weekly_budget, coalesce(review_dow, 0), to_char(review_time, 'HH24:MI')
 		  from user_preferences where user_id = $1`, userID,
 	).Scan(&qs, &qe, &ws, &we, &workDays, &daysOff, &p.NudgeDuringWork, &p.DailyLimit, &p.MinIntervalMinutes,
-		&p.NotificationsEnabled, &p.OnboardedAt, &city, &country, &p.HomeLat, &p.HomeLon)
+		&p.NotificationsEnabled, &p.OnboardedAt, &city, &country, &p.HomeLat, &p.HomeLon,
+		&p.WeeklyBudget, &p.ReviewDay, &rt)
 	if err != nil {
 		return p, err
 	}
+	p.ReviewTime = parseClock(rt)
 	p.QuietStart, p.QuietEnd = parseClock(qs), parseClock(qe)
 	p.WorkStart, p.WorkEnd = parseClock(ws), parseClock(we)
 	for _, d := range workDays {
@@ -175,6 +181,17 @@ func (s *Store) SetHome(ctx context.Context, userID int64, city, country string,
 		return nil // keep the old zone rather than store one Go cannot load
 	}
 	_, err := s.pool.Exec(ctx, `update users set timezone = $2 where id = $1`, userID, timezone)
+	return err
+}
+
+// SetReview sets the weekly review slot; day 0 turns the review off.
+func (s *Store) SetReview(ctx context.Context, userID int64, isoDay int, at Clock) error {
+	var day *int
+	if isoDay >= 1 && isoDay <= 7 {
+		day = &isoDay
+	}
+	_, err := s.pool.Exec(ctx, `update user_preferences set review_dow = $2, review_time = coalesce($3::time, review_time), updated_at = now()
+		where user_id = $1`, userID, day, clockArg(at))
 	return err
 }
 

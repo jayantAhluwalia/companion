@@ -38,6 +38,9 @@ type Message struct {
 	From      *User  `json:"from,omitempty"`
 	Chat      Chat   `json:"chat"`
 	Text      string `json:"text,omitempty"`
+	// ReplyMarkup is the inline keyboard currently under the message; a
+	// callback uses it to remove just the row that was answered.
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }
 
 type User struct {
@@ -158,13 +161,17 @@ func (c *Client) EditKeyboard(ctx context.Context, chatID, messageID int64, keyb
 	}, nil)
 }
 
-// EditText replaces a message's text and removes its buttons, so an
-// answered question reads as a record of the answer.
-func (c *Client) EditText(ctx context.Context, chatID, messageID int64, text string) error {
-	return c.call(ctx, "editMessageText", map[string]any{
+// EditText replaces a message's text. With a nil keyboard the buttons are
+// removed, so an answered question reads as a record of the answer.
+func (c *Client) EditText(ctx context.Context, chatID, messageID int64, text string, keyboard *InlineKeyboardMarkup) error {
+	payload := map[string]any{
 		"chat_id": chatID, "message_id": messageID, "text": text, "parse_mode": "HTML",
 		"link_preview_options": map[string]any{"is_disabled": true},
-	}, nil)
+	}
+	if keyboard != nil {
+		payload["reply_markup"] = keyboard
+	}
+	return c.call(ctx, "editMessageText", payload, nil)
 }
 
 func (c *Client) SetMyCommands(ctx context.Context, cmds []BotCommand) error {

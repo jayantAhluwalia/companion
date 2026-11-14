@@ -1,4 +1,4 @@
-{"thought": "I have to buy beard oil", "type": "actionable_intention"}
+{"thought": "I have run out of my beard oil - need to order it again", "type": "actionable_intention", "urgency": "now"}
 {"thought": "need to renew my bike insurance before it lapses on 5 december", "type": "actionable_intention", "hooks": ["date"]}
 {"thought": "call the plumber about the kitchen tap", "type": "actionable_intention", "no_hooks": true}
 {"thought": "sell my old helmet on olx", "type": "actionable_intention", "no_hooks": true}
@@ -9,7 +9,7 @@
 {"thought": "pay electricity bill", "type": "actionable_intention", "no_hooks": true}
 {"thought": "upgrade my phone when the new pixel comes out", "type": "actionable_intention", "hooks": ["web"]}
 {"thought": "I want to go for a motorcycle ride to Bir Billing", "type": "experience_interest", "hooks": ["weather"]}
-{"thought": "would love to do a sunrise trek at Nag Tibba sometime", "type": "experience_interest", "hooks": ["weather"]}
+{"thought": "would love to do a sunrise trek at Nag Tibba sometime", "type": "experience_interest", "hooks": ["weather"], "urgency": "whenever"}
 {"thought": "watch the new Nolan film in imax when it releases", "type": "experience_interest", "hooks": ["web"]}
 {"thought": "try that new ramen place in gurgaon everyone talks about", "type": "experience_interest"}
 {"thought": "go cycling around the lake some morning", "type": "experience_interest", "hooks": ["weather"]}
@@ -17,7 +17,7 @@
 {"thought": "take mom and dad to Rishikesh for a weekend", "type": "experience_interest", "hooks": ["weather"]}
 {"thought": "should check out the book fair if it comes to town", "type": "experience_interest", "hooks": ["web"]}
 {"thought": "what if I built a small app that splits rent among flatmates", "type": "idea_possibility"}
-{"thought": "maybe start a newsletter about motorcycle touring", "type": "idea_possibility"}
+{"thought": "maybe start a newsletter about motorcycle touring", "type": "idea_possibility", "urgency": "whenever"}
 {"thought": "could turn the spare room into a home office", "type": "idea_possibility"}
 {"thought": "idea: a telegram bot that reminds me of things at the right time", "type": "idea_possibility"}
 {"thought": "thinking of maybe investing in index funds, not sure", "type": "idea_possibility"}
@@ -34,3 +34,6 @@
 {"thought": "are you working?", "type": "unclear", "not_thought": true, "no_hooks": true}
 {"thought": "gym", "type": "personal_development"}
 {"thought": "mom's birthday gift", "type": "actionable_intention"}
+{"thought": "the geyser stopped working this morning, need to call someone", "type": "actionable_intention", "urgency": "now"}
+{"thought": "get my motorcycle serviced tomorrow morning", "type": "actionable_intention", "hooks": ["date"], "urgency": "now"}
+{"thought": "someday I want to learn to play the guitar", "type": "personal_development", "urgency": "whenever"}

@@ -37,15 +37,20 @@ func AtWork(now time.Time, p store.Prefs) bool {
 	return p.HasWorkHours() && p.IsWorkDay(isoWeekday(now)) && store.ClockOf(now).Between(p.WorkStart, p.WorkEnd)
 }
 
-// Gate answers "is now an acceptable moment to message at all?". It returns
-// "" to pass or a short reason. Which thought to pick is the score's job;
-// whether to interrupt is decided here, by rules the model cannot bend.
-func Gate(now time.Time, p store.Prefs, sentToday int, lastSent *time.Time) string {
-	clock := store.ClockOf(now)
-	switch {
-	case !p.NotificationsEnabled:
+// hardGate answers "may the app message this person at all right now?".
+// It returns "" to pass or a short reason. These are rules the model cannot
+// bend and no lane is exempt from. When the person is in the middle of
+// messaging the app (present = true) sleep and work hours do not apply:
+// they are demonstrably awake and looking at the chat.
+func hardGate(now time.Time, p store.Prefs, present bool) string {
+	if !p.NotificationsEnabled {
 		return "paused"
-	case clock.Between(shift(p.QuietStart, -sleepBufferMin), shift(p.QuietEnd, sleepBufferMin)):
+	}
+	if present {
+		return ""
+	}
+	clock := store.ClockOf(now)
+	if clock.Between(shift(p.QuietStart, -sleepBufferMin), shift(p.QuietEnd, sleepBufferMin)) {
 		return "quiet_hours"
 	}
 	if AtWork(now, p) {
@@ -58,28 +63,72 @@ func Gate(now time.Time, p store.Prefs, sentToday int, lastSent *time.Time) stri
 			}
 		}
 	}
-	if sentToday >= p.DailyLimit {
-		return "daily_cap"
-	}
-	if lastSent != nil && now.Sub(*lastSent) < time.Duration(p.MinIntervalMinutes)*time.Minute {
-		return "min_interval"
-	}
 	return ""
 }
 
-// criticalExtra is how many nudges beyond the daily limit a deadline may
-// claim. A reminder with no outside reason must never be able to block one
-// with a date on it (14 Nov review: a beard-oil check-in at 09:00 used the
-// day's slot and held back "service the motorcycle tomorrow morning").
-const criticalExtra = 1
+const (
+	// obligationsPerDay caps deadline and requested reminders in one day.
+	obligationsPerDay = 2
+	// obligationGap is the shortest pause before an obligation may follow
+	// another message. Shorter than the ordinary interval: a deadline
+	// should not wait four hours because something else went out first.
+	obligationGap = time.Hour
+	// quickPerWeek is the share of the weekly budget that reminders with no
+	// outside trigger may use, so they cannot crowd out real opportunities.
+	quickPerWeek = 3
+)
 
-// criticalOnly reports whether the day's ordinary nudge is used but a
-// deadline may still go out. The interval between nudges still applies.
-func criticalOnly(gateReason string, now time.Time, p store.Prefs, sentToday int, lastSent *time.Time) bool {
-	if gateReason != "daily_cap" || sentToday >= p.DailyLimit+criticalExtra {
-		return false
+// Permit is what may be sent right now, and why not when it may not.
+//
+// Nudges fall into two groups. Obligations (a deadline, or a time the user
+// picked with "later") go out whatever else was sent, because a reminder
+// with no reason must never block one with a date on it. Everything else is
+// budgeted: at most one a day, a few a week, and only in the day's window.
+type Permit struct {
+	Obligation bool   `json:"obligation"`
+	Budgeted   bool   `json:"budgeted"`
+	Quick      bool   `json:"quick"`
+	Reason     string `json:"reason,omitempty"` // why budgeted nudges are closed
+	Window     string `json:"window,omitempty"` // the window now is in, if any
+	Chosen     string `json:"chosen,omitempty"` // the window picked for today
+	Budget     int    `json:"budget"`           // this week's budget after back-off
+	Used       int    `json:"used"`             // of which already used
+}
+
+// effectiveBudget shrinks the weekly budget when recent nudges went
+// unanswered: two in a row halve it, four reduce it to one a week. One
+// response restores it, because the run is counted from the newest nudge.
+func effectiveBudget(base, ignoredRun int) int {
+	switch {
+	case ignoredRun >= 4:
+		return 1
+	case ignoredRun >= 2:
+		return max(1, base/2)
+	default:
+		return max(1, base)
 	}
-	return lastSent == nil || now.Sub(*lastSent) >= time.Duration(p.MinIntervalMinutes)*time.Minute
+}
+
+func permit(now time.Time, p store.Prefs, l store.Load, current, chosen string, present bool) Permit {
+	pm := Permit{Window: current, Chosen: chosen, Budget: effectiveBudget(p.WeeklyBudget, l.IgnoredRun), Used: l.BudgetedWeek + l.ReviewsWeek}
+	since := func(d time.Duration) bool { return l.LastSent == nil || now.Sub(*l.LastSent) >= d }
+
+	pm.Obligation = l.ObligationToday < obligationsPerDay && since(obligationGap)
+
+	switch {
+	case l.BudgetedToday >= p.DailyLimit:
+		pm.Reason = "daily_cap"
+	case pm.Used >= pm.Budget:
+		pm.Reason = "weekly_budget"
+	case !since(time.Duration(p.MinIntervalMinutes) * time.Minute):
+		pm.Reason = "min_interval"
+	case !present && (current == "" || current != chosen):
+		pm.Reason = "outside_window"
+	default:
+		pm.Budgeted = true
+		pm.Quick = l.QuickWeek < quickPerWeek
+	}
+	return pm
 }
 
 // cooldownDays is how long a thought rests after a nudge: three days,

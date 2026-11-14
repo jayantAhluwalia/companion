@@ -119,15 +119,146 @@ func (s *Store) ExpireNudges(ctx context.Context, userID int64, window time.Dura
 	return len(expired), nil
 }
 
-// NudgeStats feeds the daily cap and the minimum interval. A nudge the user
-// asked for with /nudge does not use up the day's automatic one, but it
-// does count for the interval, so two messages never arrive back to back.
-func (s *Store) NudgeStats(ctx context.Context, userID int64, dayStart time.Time) (sentToday int, lastSent *time.Time, err error) {
-	err = s.pool.QueryRow(ctx, `
-		select count(*) filter (where n.sent_at >= $2 and coalesce(r.trigger, 'ticker') <> 'manual'), max(n.sent_at)
-		  from nudges n left join decision_runs r on r.id = n.decision_run_id
-		 where n.user_id = $1 and n.sent_at is not null`, userID, dayStart).Scan(&sentToday, &lastSent)
-	return
+// Load is how much the user has been sent lately. Deadline and requested
+// reminders are counted apart from the rest: they are obligations, and the
+// budget exists to ration everything else. Nudges the user asked for with
+// /nudge count for nothing except the gap between messages.
+type Load struct {
+	BudgetedToday   int        // opportunity + quick nudges sent today
+	ObligationToday int        // deadline + requested nudges sent today
+	BudgetedWeek    int        // opportunity + quick nudges in the last 7 days
+	QuickWeek       int        // quick nudges in the last 7 days
+	ReviewsWeek     int        // weekly reviews in the last 7 days
+	LastSent        *time.Time // any nudge at all
+	IgnoredRun      int        // how many of the most recent budgeted nudges went unanswered, in a row
+}
+
+func (s *Store) NudgeLoad(ctx context.Context, userID int64, dayStart, now time.Time) (Load, error) {
+	var l Load
+	weekStart := now.Add(-7 * 24 * time.Hour)
+	err := s.pool.QueryRow(ctx, `
+		with n as (
+			select n.sent_at, n.lane, coalesce(r.trigger, 'ticker') <> 'manual' as auto
+			  from nudges n left join decision_runs r on r.id = n.decision_run_id
+			 where n.user_id = $1 and n.sent_at is not null
+		)
+		select count(*) filter (where auto and sent_at >= $2 and lane in ('opportunity', 'quick')),
+		       count(*) filter (where auto and sent_at >= $2 and lane in ('deadline', 'requested')),
+		       count(*) filter (where auto and sent_at >= $3 and lane in ('opportunity', 'quick')),
+		       count(*) filter (where auto and sent_at >= $3 and lane = 'quick'),
+		       max(sent_at),
+		       (select count(*) from reviews where user_id = $1 and sent_at >= $3)
+		  from n`, userID, dayStart, weekStart,
+	).Scan(&l.BudgetedToday, &l.ObligationToday, &l.BudgetedWeek, &l.QuickWeek, &l.LastSent, &l.ReviewsWeek)
+	if err != nil {
+		return l, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		select n.status from nudges n left join decision_runs r on r.id = n.decision_run_id
+		 where n.user_id = $1 and n.lane in ('opportunity', 'quick') and n.status in ('responded', 'expired')
+		   and coalesce(r.trigger, 'ticker') <> 'manual'
+		 order by n.sent_at desc limit 8`, userID)
+	if err != nil {
+		return l, err
+	}
+	defer rows.Close()
+	counting := true
+	for rows.Next() {
+		var status string
+		if err := rows.Scan(&status); err != nil {
+			return l, err
+		}
+		if counting && status == "expired" {
+			l.IgnoredRun++
+		} else {
+			counting = false
+		}
+	}
+	return l, rows.Err()
+}
+
+// DeadlineTouch is what a thought has already been sent about its deadline.
+type DeadlineTouch struct {
+	Count int
+	Last  time.Time
+}
+
+// DeadlineTouches returns recent deadline reminders per thought, so each
+// deadline gets at most two: a heads-up and the moment itself.
+func (s *Store) DeadlineTouches(ctx context.Context, userID int64) (map[int64]DeadlineTouch, error) {
+	out := map[int64]DeadlineTouch{}
+	rows, err := s.pool.Query(ctx, `
+		select thought_id, count(*), max(sent_at) from nudges
+		 where user_id = $1 and lane = 'deadline' and sent_at >= now() - interval '4 days'
+		 group by thought_id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var t DeadlineTouch
+		if err := rows.Scan(&id, &t.Count, &t.Last); err != nil {
+			return nil, err
+		}
+		out[id] = t
+	}
+	return out, rows.Err()
+}
+
+// Tally is how nudges sent in one window of the day have gone.
+type Tally struct {
+	Acted   int // "Let's do it" or "Next steps"
+	Ignored int // no response within a day
+}
+
+// WindowTallies counts outcomes per send window over the last six months,
+// using only nudges sent before the given time so that a day's choice of
+// window does not shift while the day is in progress. "Later" and "Not
+// interested" are left out: the first is neutral, the second is about the
+// thought, not the timing.
+func (s *Store) WindowTallies(ctx context.Context, userID int64, before time.Time) (map[string]Tally, error) {
+	out := map[string]Tally{}
+	rows, err := s.pool.Query(ctx, `
+		select send_window,
+		       count(*) filter (where response_action in ('do_it', 'next_steps')),
+		       count(*) filter (where status = 'expired')
+		  from nudges
+		 where user_id = $1 and send_window is not null and lane in ('opportunity', 'quick')
+		   and sent_at < $2 and sent_at >= $2 - interval '180 days'
+		 group by send_window`, userID, before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var w string
+		var t Tally
+		if err := rows.Scan(&w, &t.Acted, &t.Ignored); err != nil {
+			return nil, err
+		}
+		out[w] = t
+	}
+	return out, rows.Err()
+}
+
+// RecentNudgeMessages returns the last few messages sent, newest first, so
+// the writer can avoid repeating itself.
+func (s *Store) RecentNudgeMessages(ctx context.Context, userID int64, limit int) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `select message from nudges where user_id = $1 and sent_at is not null order by sent_at desc limit $2`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 type Nudge struct {
@@ -139,14 +270,16 @@ type Nudge struct {
 	Message       string
 	SuggestedStep string
 	Channel       string
+	Lane          string // deadline | requested | opportunity | quick
+	Window        string // which window of the day it went out in; "" if none
 }
 
 func (s *Store) CreateNudge(ctx context.Context, n Nudge) (int64, error) {
 	var id int64
 	err := s.pool.QueryRow(ctx, `
-		insert into nudges (user_id, thought_id, decision_run_id, nudge_type, style, channel, message, suggested_action)
-		values ($1, $2, $3, $4, $4, $5, $6, $7) returning id`,
-		n.UserID, n.ThoughtID, n.DecisionRunID, n.NudgeType, n.Channel, n.Message, n.SuggestedStep).Scan(&id)
+		insert into nudges (user_id, thought_id, decision_run_id, nudge_type, style, channel, message, suggested_action, lane, send_window)
+		values ($1, $2, $3, $4, $4, $5, $6, $7, $8, nullif($9, '')) returning id`,
+		n.UserID, n.ThoughtID, n.DecisionRunID, n.NudgeType, n.Channel, n.Message, n.SuggestedStep, n.Lane, n.Window).Scan(&id)
 	return id, err
 }
 

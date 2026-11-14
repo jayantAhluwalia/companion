@@ -10,10 +10,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/v2"
 )
 
-//go:embed prompts/decide_v2.md
+//go:embed prompts/decide_v3.md
 var decidePrompt string
 
-const DecidePromptVersion = "decide_v2"
+const DecidePromptVersion = "decide_v3"
 
 // Nudge types, shared with the nudges table.
 var NudgeTypes = []string{"opportunity", "action_prompt", "check_in", "revival", "relevance_check", "follow_up"}
@@ -28,6 +28,8 @@ type DecideSignal struct {
 
 type DecideCandidate struct {
 	ThoughtID      int64          `json:"thought_id"`
+	Lane           string         `json:"lane"` // deadline | requested | opportunity | quick
+	Urgency        string         `json:"urgency,omitempty"`
 	OriginalWords  string         `json:"original_words"`
 	Type           ThoughtType    `json:"type"`
 	Title          string         `json:"title"`
@@ -44,11 +46,16 @@ type DecideCandidate struct {
 }
 
 type DecideInput struct {
-	Now        string            `json:"now"`
-	Routine    string            `json:"routine"`
-	Home       string            `json:"home,omitempty"`
-	Forced     bool              `json:"forced"`
-	Candidates []DecideCandidate `json:"candidates"`
+	Now     string `json:"now"`
+	Routine string `json:"routine"`
+	Home    string `json:"home,omitempty"`
+	Forced  bool   `json:"forced"`
+	// Piggyback is true when the person has just been messaging the app, so
+	// this arrives as a follow-on to that exchange, not as an interruption.
+	Piggyback bool `json:"piggyback"`
+	// RecentNudges are the last few messages sent, so wording can vary.
+	RecentNudges []string          `json:"recent_nudges"`
+	Candidates   []DecideCandidate `json:"candidates"`
 }
 
 // Decision is the model's proposal. The engine validates it before anything

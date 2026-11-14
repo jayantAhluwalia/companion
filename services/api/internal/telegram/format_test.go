@@ -66,4 +66,13 @@ func TestMessagesAreValidHTML(t *testing.T) {
 	})
 	balanced(t, "interpretation", interp)
 	t.Logf("\n%s", interp)
+
+	review := formatReview(engine.ReviewMessage{
+		Week:     store.WeekSummary{Sent: 3, Acted: 2, Done: 2, Captured: 4},
+		CheckIns: []store.ReviewItem{{ThoughtID: 3, Title: "Wardrobe <light>", Type: "idea_possibility"}},
+		Items: []store.ReviewItem{{ThoughtID: 2, Title: "Bir Billing & beyond", Type: "experience_interest", AgeDays: 12},
+			{ThoughtID: 4, Title: "Buy lowers for winter", Type: "actionable_intention", AgeDays: 2}},
+	})
+	balanced(t, "review", review)
+	t.Logf("\n%s", review)
 }

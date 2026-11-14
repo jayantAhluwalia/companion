@@ -45,7 +45,7 @@ func (b *Bot) correction(ctx context.Context, user store.User, action string, th
 			return "Couldn't save that."
 		}
 		_ = b.db.Touch(ctx, thoughtID)
-		_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(thoughtID, fixed))
+		_ = b.client.EditText(ctx, chat, msgID, formatInterpretation(thoughtID, fixed), nil)
 		return "Fixed."
 
 	case "cn":

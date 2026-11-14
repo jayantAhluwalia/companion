@@ -64,6 +64,9 @@ func formatInterpretation(thoughtID int64, i ai.Interpretation) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s  <b>%s</b>\n", typeIcon(i.Type), Esc(i.Title))
 	fmt.Fprintf(&sb, "<i>%s · %.0f%% sure · #%d</i>\n", typeLabel(i.Type), i.Confidence*100, thoughtID)
+	if i.Urgency == ai.UrgencyNow {
+		sb.WriteString("⚡ <i>Sounds urgent, so I won't wait long to bring it up</i>\n")
+	}
 	if i.ClarificationNeeded && i.ClarificationQuestion != "" {
 		fmt.Fprintf(&sb, "\n❔ %s\n", Esc(i.ClarificationQuestion))
 	}
@@ -169,11 +172,39 @@ func formatRoutine(p store.Prefs) string {
 	} else {
 		sb.WriteString("📍  City  <i>not set, so no weather-aware nudges yet</i>\n")
 	}
-	limit := "1 nudge a day"
-	if p.DailyLimit != 1 {
-		limit = fmt.Sprintf("%d nudges a day", p.DailyLimit)
+	if p.ReviewDay == 0 {
+		sb.WriteString("🗓  Weekly review  <b>off</b>\n")
+	} else {
+		fmt.Fprintf(&sb, "🗓  Weekly review  <b>%s %s</b>\n", engine.DayList([]int{p.ReviewDay}), p.ReviewTime)
 	}
-	fmt.Fprintf(&sb, "\n<i>At most %s. Tap to change anything.</i>", limit)
+	fmt.Fprintf(&sb, "\n<i>At most %d nudges a week and one a day; deadlines are extra. Tap to change anything.</i>", p.WeeklyBudget)
+	return sb.String()
+}
+
+// formatReview renders the weekly review: the week's record, then what
+// needs a decision.
+func formatReview(r engine.ReviewMessage) string {
+	var sb strings.Builder
+	sb.WriteString("🗓  <b>Weekly review</b>\n")
+	w := r.Week
+	fmt.Fprintf(&sb, "<i>This week: %d captured · %d nudges, %d acted on · %d done</i>\n", w.Captured, w.Sent, w.Acted, w.Done)
+	if len(r.CheckIns) > 0 {
+		sb.WriteString("\n<b>You said let's do it. Did these get done?</b>\n")
+		for _, it := range r.CheckIns {
+			fmt.Fprintf(&sb, "#%d  %s  %s\n", it.ThoughtID, typeIcon(ai.ThoughtType(it.Type)), Esc(clean(it.Title)))
+		}
+	}
+	if len(r.Items) > 0 {
+		sb.WriteString("\n<b>Still want these?</b>\n")
+		for _, it := range r.Items {
+			age := ""
+			if it.AgeDays >= 7 {
+				age = fmt.Sprintf("  <i>%d days</i>", it.AgeDays)
+			}
+			fmt.Fprintf(&sb, "#%d  %s  %s%s\n", it.ThoughtID, typeIcon(ai.ThoughtType(it.Type)), Esc(clean(it.Title)), age)
+		}
+	}
+	sb.WriteString("\n<i>Keep leaves it be. Dropping one is fine: it means the list stays yours.</i>")
 	return sb.String()
 }
 

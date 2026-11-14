@@ -34,6 +34,7 @@ type HookState struct {
 	// Critical marks a deadline that is today or tomorrow. A critical nudge
 	// may go out even when the day's ordinary nudge has been used.
 	Critical bool `json:"critical,omitempty"`
+	DueIn    int  `json:"due_in,omitempty"` // days until a critical deadline: 0 or 1
 }
 
 // critical reports whether any hook of a scored thought is date-critical.
@@ -219,7 +220,10 @@ func dateState(h ai.Hook, now time.Time) HookState {
 		return st
 	}
 	until := int(d.Sub(day(now)).Hours() / 24)
-	lead := max(h.LeadDays, 1)
+	// The lead is the interpreter's judgement of how far ahead a reminder
+	// helps. Zero is a real answer: "the parcel arrives on the 16th" needs
+	// no heads-up the day before, only a word on the day.
+	lead := max(h.LeadDays, 0)
 	st.Facts = map[string]any{"date": h.Date, "days_until": until}
 	switch {
 	case until < 0:
@@ -227,12 +231,25 @@ func dateState(h ai.Hook, now time.Time) HookState {
 	case until <= lead:
 		st.State = StateFired
 		st.Critical = until <= 1
+		st.DueIn = until
 		st.Summary = fmt.Sprintf("%s is %s", d.Format("Mon 2 Jan"), inDays(until))
 		st.Footnote = fmt.Sprintf("%s is %s", d.Format("Mon 2 Jan"), inDays(until))
 	default:
-		st.State, st.Summary = StateWaiting, fmt.Sprintf("%s is %d days away; useful from %d day(s) before", d.Format("Mon 2 Jan"), until, lead)
+		st.State = StateWaiting
+		st.Summary = fmt.Sprintf("%s is %s; I will bring it up %s", d.Format("Mon 2 Jan"), inDays(until), leadText(lead))
 	}
 	return st
+}
+
+func leadText(lead int) string {
+	switch lead {
+	case 0:
+		return "on the day"
+	case 1:
+		return "the day before"
+	default:
+		return fmt.Sprintf("%d days before", lead)
+	}
 }
 
 func inDays(n int) string {
